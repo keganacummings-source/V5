@@ -1,18 +1,44 @@
-name = "turbz3"
+name = "dreamdaw"
+main = "worker/index.ts"
 compatibility_date = "2025-10-01"
-compatibility_flags = ["nodejs_compat"]
 
-# Serve the static build as Cloudflare Workers Static Assets.
-# Custom domain (dreamdaw.com) is attached in the Cloudflare dashboard
-# after the first deploy, or via `wrangler domains` / routes below.
-assets = { directory = "./dist-static" }
+# Attach the apex domain as a Custom Domain (Cloudflare creates the DNS record
+# + certificate on deploy). dreamdaw.com must be a zone on this Cloudflare
+# account, and the apex must not already have an A/AAAA/CNAME record.
+#
+# www is intentionally NOT attached: serving the game from two origins would
+# split players' localStorage saves. Add a Redirect Rule in the dashboard
+# (www.dreamdaw.com/* -> https://dreamdaw.com/${1}, 301) instead.
+routes = [
+  { pattern = "dreamdaw.com", custom_domain = true },
+]
 
-# Uncomment and adjust if you want the worker to claim the root domain.
-# You must already have dreamdaw.com on this Cloudflare account.
-# routes = [
-#   { pattern = "dreamdaw.com/*", zone_name = "dreamdaw.com" },
-#   { pattern = "www.dreamdaw.com/*", zone_name = "dreamdaw.com" }
-# ]
+# Keep the *.workers.dev URL for smoke-testing. Set to false once you're happy.
+workers_dev = true
 
-# Optional account_id if you use multiple accounts (prefer env var or wrangler login).
-# account_id = "YOUR_ACCOUNT_ID"
+[assets]
+directory = "./dist-static"
+binding = "ASSETS"
+# Only /api/* invokes the worker. Everything else (game files, tiles, sprites)
+# is served straight from the asset store, which is free and unmetered.
+run_worker_first = ["/api/*"]
+# Do NOT enable "single-page-application" here: the game probes optional files
+# (/music/veil.ogg via HEAD, /Maps/main.json) and relies on a real 404 when
+# they're absent. An SPA fallback would answer 200 + index.html and break that.
+not_found_handling = "none"
+
+# WebRTC signaling rooms (one Durable Object per room code) + lobby index.
+[[durable_objects.bindings]]
+name = "ROOMS"
+class_name = "SignalingRoom"
+
+[[durable_objects.bindings]]
+name = "REGISTRY"
+class_name = "LobbyRegistry"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["SignalingRoom", "LobbyRegistry"]
+
+[observability]
+enabled = true
