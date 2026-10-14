@@ -25,11 +25,26 @@ export type Spawn = {
   kind: "mob" | "node";
   species?: string;
   node?: "ore" | "tree" | "shroom" | "fish";
-  /** Picked up automatically when the player walks next to it (outside Hardcore). */
+  /** Legacy. Gathering requires E; walking into a node no longer collects it. */
   auto?: boolean;
   x: number;
   y: number;
   level: number;
+  /** When set, the spawn's level is used as written instead of scaling to the hunter. */
+  fixedLevel?: boolean;
+  /** Runtime copy of the designer zone this foe came from. */
+  zone?: {
+    id: string;
+    tx: number;
+    ty: number;
+    tw: number;
+    th: number;
+    levelMin: number;
+    levelMax: number;
+    species: string[];
+    count: number;
+    respawn: number;
+  };
   boss?: boolean;
   dungeonBoss?: boolean;
   bossId?: string;

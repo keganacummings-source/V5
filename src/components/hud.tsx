@@ -1,4 +1,4 @@
-import { Backpack, Map as MapIcon, ScrollText, User, Users } from "lucide-react";
+import { Backpack, FlaskConical, Ghost, Map as MapIcon, ScrollText, User, Users } from "lucide-react";
 import type { getSnap, TurbzGame } from "@/game/engine";
 
 type Snap = ReturnType<typeof getSnap>;
@@ -21,6 +21,8 @@ const ACTIONS = [
   { id: "sheet", label: "Sheet", key: "C", Icon: User, testid: "hud-sheet-btn" },
   { id: "bag", label: "Bag", key: "B", Icon: Backpack, testid: "hud-bag-btn" },
   { id: "moves", label: "Verses", key: "V", Icon: ScrollText, testid: "hud-moves-btn" },
+  { id: "ghost", label: "Spirits", key: "G", Icon: Ghost, testid: "hud-spirits-btn" },
+  { id: "craft", label: "Craft", key: "X", Icon: FlaskConical, testid: "hud-craft-btn" },
   { id: "map", label: "Map", key: "M", Icon: MapIcon, testid: "hud-map-btn" },
   { id: "lobby", label: "Lobby", key: "L", Icon: Users, testid: "hud-lobby-btn" },
 ] as const;

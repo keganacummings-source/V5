@@ -12,6 +12,7 @@ import {
   ANIMAL_BY_ID,
   ITEM_BY_ID,
   ITEMS,
+  ALCHEMY_RECIPES,
   MONSTER_BY_ID,
   MONSTERS,
   MOVE_BY_ID,
@@ -46,6 +47,8 @@ import {
   rollGear,
   rollGhostLook,
   rollInnate,
+  rollSpiritKit,
+  spiritAidsPlayer,
   scaleTile,
   skillLine,
   skillNeed,
@@ -73,7 +76,7 @@ import {
 import type { GraveBody } from "./social-types";
 import { aptitudeOf, buffLines, classProfile, classGendered, IMMUNE_LABEL, STAT_LABEL, TRAIT_BY_ID } from "./classes";
 import { drawActor, drawMonster, drawSetAura, drawShadowName, fxColor } from "./sprites";
-import { mapToWorld, savedMaps } from "./map-format";
+import { expandZones, mapToWorld, savedMaps } from "./map-format";
 import { CombatFx } from "./combat-fx";
 import { directionFromDelta, type ActorDirection } from "./actor-sheets.config";
 import { initActorSprites } from "./actor-sprites";
@@ -96,7 +99,7 @@ import {
   type WorldData,
 } from "./world";
 
-export type Panel = null | "sheet" | "lobby" | "bag" | "skills" | "quests" | "map" | "talk" | "shop" | "death" | "pause" | "trade" | "ghost" | "moves" | "chat" | "bounty" | "rebirth" | "survival";
+export type Panel = null | "sheet" | "lobby" | "bag" | "skills" | "quests" | "map" | "talk" | "shop" | "death" | "pause" | "trade" | "ghost" | "moves" | "chat" | "bounty" | "rebirth" | "survival" | "craft";
 export type Snap = {
   mode: "title" | "create" | "play";
   hasSave: boolean;
@@ -139,6 +142,10 @@ export type Snap = {
   shrine: string;
   companion: string;
   box: string[];
+  spirits: { uid: string; name: string; type: TypeId; level: number; rarity: number; hp: number; max: number; active: boolean; known: { id: string; name: string; about: string; type: TypeId; player: boolean; slotted: boolean }[]; slots: string[] }[];
+  spiritSlots: number;
+  spiritCap: number;
+  jarLeft: number;
   known: { id: string; name: string; type: TypeId }[];
   stash: string[];
   selected: string | null;
@@ -197,10 +204,12 @@ type Mob = {
   rarity: number; direction: ActorDirection; facing: number; walk: number; swing: number; move: string; animal: boolean; witch: boolean;
   race: RaceId | null; lootGear: Gear[]; lootBag: Record<string, number>; lootKyo: number; huntIn: number; seen: boolean;
   ghost?: boolean; look?: GhostLook | null; speed?: number; master?: string; aggro?: boolean;
+  zone?: { id: string; tx: number; ty: number; tw: number; th: number; levelMin: number; levelMax: number; species: string[]; count: number; respawn: number } | null;
 };
 type Spirit = {
   uid: string; species: string; name: string; type: TypeId; template: number; level: number; rarity: number;
   look: GhostLook; move: string; hp: number; max: number; speed: number;
+  known?: string[]; slots?: string[]; active?: boolean;
 };
 type GhostPet = { species: string; level: number; rarity: number; look?: GhostLook; move?: string; name?: string; type?: TypeId; template?: number; hp?: number; max?: number; speed?: number };
 type SkillState = Record<SkillId, { level: number; xp: number }>;
@@ -213,6 +222,7 @@ type Save = {
   stash: EnchantRoll[]; saltTurned: number; accountLevel: number; accountXp: number; perkPoints: number;
   perks: Record<string, number>; lastTavern: string; innate: string[]; party: string[]; found: Record<string, Slot[]>;
   spirits?: Spirit[]; accountScore?: number; evilMark?: number; deathBanked?: boolean; traitId?: string | null; female?: boolean; classMovesV?: number;
+  ghostSlots?: number; jarLeft?: number;
 };
 type Part = { x: number; y: number; vx: number; vy: number; life: number; max: number; color: string; size: number; kind: string };
 type Flo = { x: number; y: number; text: string; life: number; color: string };
@@ -262,6 +272,10 @@ const emptySnap = (): Snap => ({
 	shrine: "",
 	companion: "No spirit",
 	box: [],
+	spirits: [],
+	spiritSlots: 3,
+	spiritCap: 20,
+	jarLeft: 0,
 	known: [],
 	stash: [],
 	selected: null,
@@ -488,6 +502,7 @@ export class TurbzGame {
 			if (e.code === "KeyQ") this.toggle("quests");
 			if (e.code === "KeyM") this.toggle("map");
 			if (e.code === "KeyG") this.toggle("ghost");
+			if (e.code === "KeyX") this.toggle("craft");
 			if (e.code === "KeyV") this.toggle("moves");
 			if (e.code === "KeyC") this.toggle("sheet");
 			if (e.code === "KeyL") this.toggle("lobby");
@@ -756,6 +771,7 @@ export class TurbzGame {
 			if (!file) return this.loadMap("world", true);
 			this.customFile = file;
 			this.world = mapToWorld(file);
+			this.world.spawns.push(...expandZones(file));
 			this.world.entry = { x: (file.spawn?.tx ?? 1) * 32 + 16, y: (file.spawn?.ty ?? 1) * 32 + 16 };
 		} else if (map.startsWith("rift-")) {
 			const portal = save.dungeons.portals.find(p => p.id === map);
@@ -782,7 +798,7 @@ export class TurbzGame {
 		const hunter = Math.max(1, this.save?.level ?? s.level ?? 1);
 		const hc = this.rules === "hardcore" ? this.threat().lv : 0;
 		const near = this.rules === "hardcore" ? Math.max(hunter - 1, levelNearHunter(hunter, Math.random())) + hc : levelNearHunter(hunter, Math.random());
-		const level = s.dungeonBoss ? Math.max(1, s.level) + hc : s.boss ? Math.max(s.level, hunter + 1 + (Math.random() * 4 | 0)) + hc : near;
+		const level = s.fixedLevel ? Math.max(1, Math.min(100, s.level | 0)) : s.dungeonBoss ? Math.max(1, s.level) + hc : s.boss ? Math.max(s.level, hunter + 1 + (Math.random() * 4 | 0)) + hc : near;
 		const rarity = s.dungeonBoss ? 0 : rarityForLevel(level, Math.random(), !!s.boss);
 		const threat = this.threat();
 		const max0 = animal ? Math.floor(14 + level * 7) : Math.floor((26 + level * 16) * (s.dungeonBoss ? 3.0 : s.boss ? 6.5 : 1) * (1 + rarity * 0.45));
@@ -834,7 +850,8 @@ export class TurbzGame {
 			look,
 			speed,
 			master: "",
-			aggro: look?.aggression === "hunt"
+			aggro: look?.aggression === "hunt",
+			zone: s.zone ?? null
 		};
 	}
 	step(dt) {
@@ -1017,6 +1034,10 @@ export class TurbzGame {
 		this.status.forEach((s) => s.t -= dt);
 		this.status = this.status.filter((s) => s.t > 0);
 		if (this.buff.t > 0) this.buff.t -= dt;
+		if ((save.jarLeft ?? 0) > 0) {
+			save.jarLeft = Math.max(0, save.jarLeft - dt);
+			if (save.jarLeft === 0) this.say("The jar's hum fades.");
+		}
 		this.hurt = Math.max(0, this.hurt - dt * 3);
 		this.attackT = Math.max(0, this.attackT - dt * 3);
 		if (this.status.find((s) => s.id === "burn")) this.hurtSelf(8 * dt, "burn");
@@ -1037,7 +1058,7 @@ export class TurbzGame {
 		this.tickIncoming(dt);
 		this.evadeT = Math.max(0, (this.evadeT ?? 0) - dt);
 		this.visitRegion();
-		this.autoHarvest();
+		// Nodes are gathered with E. Do not pick them up by walking into them.
 		const set = this.setInfo();
 		if (set.on && set.fx && this.combat > 0) {
 			this.setProc += dt;
@@ -1062,6 +1083,27 @@ export class TurbzGame {
 	tickAutoplay(dt) {
 		const save = this.save;
 		if (this.dead || !this.world) return;
+		if (this.channel) return;
+		const gathering = this.grind === "mining" || this.grind === "woodcutting" || this.grind === "shroom" || this.grind === "alchemy";
+		if (gathering) {
+			const want = this.grind === "mining" ? "ore" : this.grind === "woodcutting" ? "tree" : "shroom";
+			const near = this.nodeNear(want, 48);
+			if (near) {
+				this.path = [];
+				this.dest = null;
+				this.startNode(near.id, near.node);
+				return;
+			}
+		}
+		if (this.grind === "fishing") {
+			const shore = nearestShore(this.world, save.x, save.y);
+			if (shore && Math.hypot(shore.x - save.x, shore.y - save.y) <= 20 && nearestWaterTile(this.world, save.x, save.y, 80)) {
+				this.path = [];
+				this.dest = null;
+				this.startFishing();
+				return;
+			}
+		}
 		const hpPct = save.hp / Math.max(1, this.maxHp());
 		const threat = this.nearestMob(save.x, save.y, 90);
 		if (hpPct < .34 && threat) {
@@ -1128,14 +1170,28 @@ export class TurbzGame {
 	aimSkill(id) {
 		const save = this.save;
 		if (id === "mining" || id === "woodcutting" || id === "fishing" || id === "shroom") {
-			const node = id === "mining" ? "ore" : id === "woodcutting" ? "tree" : id === "fishing" ? "fish" : "shroom";
-			if (node === "fish" && nearestWaterTile(this.world, save.x, save.y, 80)) {
+			if (id === "fishing") {
+				const shore = nearestShore(this.world, save.x, save.y);
+				if (!shore) return false;
+				if (Math.hypot(shore.x - save.x, shore.y - save.y) <= 18 && nearestWaterTile(this.world, save.x, save.y, 80)) {
+					this.path = [];
+					this.dest = null;
+					if (!this.channel) this.startFishing();
+					return true;
+				}
+				return this.walkTo(shore.x, shore.y);
+			}
+			const node = id === "mining" ? "ore" : id === "woodcutting" ? "tree" : "shroom";
+			const live = this.nearestLiveNode(node);
+			if (!live) return false;
+			if (Math.hypot(live.x - save.x, live.y - save.y) <= 52) {
 				this.path = [];
-				if (!this.channel) this.startFishing();
+				this.dest = null;
+				if (!this.channel) this.startNode(live.id, live.node);
 				return true;
 			}
-			const at = this.nearestNode(node);
-			return at ? this.walkTo(at.x, at.y) : false;
+			const stand = this.standNear(live.x, live.y);
+			return stand ? this.walkTo(stand.x, stand.y) : this.walkTo(live.x, live.y);
 		}
 		if (id === "trading") {
 			if ([
@@ -1154,20 +1210,23 @@ export class TurbzGame {
 			return beast ? this.walkTo(beast.x, beast.y) : false;
 		}
 		if (id === "alchemy") {
-			if ((save.bag.dreamspore ?? 0) > 0 && (save.bag.embercap ?? 0) > 0) {
-				this.brew("warmth");
+			for (const recipe of ALCHEMY_RECIPES) {
+				if (Object.entries(recipe.costs).every(([k, n]) => (save.bag[k] ?? 0) >= n)) {
+					this.brew(recipe.id);
+					this.path = [];
+					return true;
+				}
+			}
+			const at = this.nearestLiveNode("shroom");
+			if (!at) return false;
+			if (Math.hypot(at.x - save.x, at.y - save.y) <= 52) {
+				this.path = [];
+				this.dest = null;
+				if (!this.channel) this.startNode(at.id, at.node);
 				return true;
 			}
-			if ((save.bag.ironroot ?? 0) > 0 && (save.bag.mushroom ?? 0) > 0) {
-				this.brew("ward");
-				return true;
-			}
-			if ((save.bag.dreamspore ?? 0) > 0 && (save.bag.blue_lantern ?? 0) > 0) {
-				this.brew("eye");
-				return true;
-			}
-			const at = this.nearestNode("shroom");
-			return at ? this.walkTo(at.x, at.y) : false;
+			const stand = this.standNear(at.x, at.y);
+			return stand ? this.walkTo(stand.x, stand.y) : this.walkTo(at.x, at.y);
 		}
 		if (id === "social") {
 			let best = null;
@@ -1217,30 +1276,31 @@ export class TurbzGame {
 			return far ? this.walkTo(far.x, far.y) : false;
 		}
 		if (id === "catching") {
-			if ((save.bag.ghost_jar ?? 0) <= 0) {
-				const holt = NPCS.find((n) => n.id === "holt");
-				if (!holt) return false;
-				const at = scaleTile(holt.tx, holt.ty);
-				const x = at.tx * 32 + 16;
-				const y = at.ty * 32 + 20;
-				if (Math.hypot(x - save.x, y - save.y) < 50) {
-					const cost = ITEM_BY_ID.ghost_jar ? this.price(ITEM_BY_ID.ghost_jar.price) : 99;
-					if (save.kyo < cost) return false;
-					this.buyItem("ghost_jar");
+			if ((save.jarLeft ?? 0) <= 0) {
+				if ((save.bag.ghost_jar ?? 0) > 0) {
+					this.useSpiritJar();
 					this.path = [];
 					return true;
 				}
-				return this.walkTo(x, y);
+				const holt = NPCS.find((n) => n.id === "holt");
+				if (holt) {
+					const at = scaleTile(holt.tx, holt.ty);
+					const x = at.tx * 32 + 16;
+					const y = at.ty * 32 + 20;
+					if (Math.hypot(x - save.x, y - save.y) < 50) {
+						const cost = ITEM_BY_ID.ghost_jar ? this.price(ITEM_BY_ID.ghost_jar.price) : 99;
+						if (save.kyo >= cost) {
+							this.buyItem("ghost_jar");
+							this.useSpiritJar();
+							this.path = [];
+							return true;
+						}
+					} else return this.walkTo(x, y);
+				}
 			}
-			const soft = this.mobs.find((m) => m.alive && !m.boss && m.hp / m.max <= .5);
-			if (soft && Math.hypot(soft.x - save.x, soft.y - save.y) < 70) {
-				this.catchSpirit();
-				this.path = [];
-				return true;
-			}
-			const foe = soft ?? this.nearestMob(save.x, save.y, 2400);
+			const foe = this.nearestMob(save.x, save.y, 2400);
 			if (!foe) return false;
-			if (Math.hypot(foe.x - save.x, foe.y - save.y) < 64) {
+			if (Math.hypot(foe.x - save.x, foe.y - save.y) < 70) {
 				this.path = [];
 				return true;
 			}
@@ -1257,14 +1317,46 @@ export class TurbzGame {
 	nearestNode(node) {
 		const save = this.save;
 		if (node === "fish") return nearestShore(this.world, save.x, save.y);
+		const live = this.nearestLiveNode(node);
+		return live ? { x: live.x, y: live.y } : null;
+	}
+	nearestLiveNode(node) {
+		const save = this.save;
 		let best = null;
 		let bd = 1e9;
-		for (const n of this.world.spawns) {
+		for (const n of this.world?.spawns ?? []) {
 			if (n.kind !== "node" || n.node !== node) continue;
 			const d = Math.hypot(n.x - save.x, n.y - save.y);
-			if (d < bd) { bd = d; best = { x: n.x, y: n.y }; }
+			if (d < bd) { bd = d; best = n; }
 		}
 		return best;
+	}
+	/** A walkable tile beside a node, so autoplay stops next to it instead of pushing into it. */
+	standNear(x, y) {
+		const save = this.save;
+		const tx = Math.floor(x / 32);
+		const ty = Math.floor(y / 32);
+		let best = null;
+		let bd = 1e9;
+		for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+			if (!dx && !dy) continue;
+			const px = (tx + dx) * 32 + 16;
+			const py = (ty + dy) * 32 + 16;
+			if (blocked(this.world, px, py)) continue;
+			const d = Math.hypot(px - save.x, py - save.y);
+			if (d < bd) { bd = d; best = { x: px, y: py }; }
+		}
+		return best;
+	}
+	zoneSpot(z) {
+		const spots = [];
+		for (let ty = z.ty; ty < z.ty + z.th; ty++) for (let tx = z.tx; tx < z.tx + z.tw; tx++) {
+			const px = tx * 32 + 16;
+			const py = ty * 32 + 16;
+			if (!blocked(this.world, px, py)) spots.push({ x: px, y: py });
+		}
+		if (!spots.length) return null;
+		return spots[Math.floor(Math.random() * spots.length)];
 	}
 	/** Nearest live resource node of a kind (or any kind) within `reach` px of the player. */
 	nodeNear(node, reach = 64, autoOnly = false) {
@@ -1310,6 +1402,8 @@ export class TurbzGame {
 		if (!nearestWaterTile(this.world, save.x, save.y, 80)) { this.say("Stand beside water to fish."); return; }
 		const perk = 1 - Math.min(75, this.chan("fish_luck")) / 100;
 		const wait = (FISH_BITE_MIN + Math.random() * (FISH_BITE_MAX - FISH_BITE_MIN)) * perk;
+		this.dest = null;
+		if (this.autoplay) { this.path = []; this.pathI = 0; }
 		this.channel = { kind: "fishing", x: save.x, y: save.y, map: save.map, t: 0, need: Math.max(.25, wait) };
 		this.say("Line cast...");
 	}
@@ -1834,7 +1928,7 @@ export class TurbzGame {
 		if (!save || !mob?.alive || this.dead) return;
 		mob.alive = false;
 		mob.hp = 0;
-		mob.respawn = mob.boss ? 70 : 22;
+		mob.respawn = mob.zone?.respawn ?? (mob.boss ? 70 : 22);
 		const portal = save.dungeons?.portals.find(p => p.id === save.map);
 		if (portal) {
 			if (!portal.defeated.includes(mob.id)) portal.defeated.push(mob.id);
@@ -1918,34 +2012,40 @@ export class TurbzGame {
 		const save = this.save;
 		if (!save || mob.animal || mob.boss || mob.witch || mob.id.startsWith("shrine") || mob.master) return;
 		const catchLv = save.skills.catching?.level ?? 1;
-		const chance = 0.1 + Math.min(0.22, (catchLv - 1) * 0.004) + this.chan("catch_boost") / 220 + mob.rarity * 0.03;
+		const jar = (save.jarLeft ?? 0) > 0 ? 0.45 : 0;
+		const chance = Math.min(0.92, 0.12 + Math.min(0.22, (catchLv - 1) * 0.004) + this.chan("catch_boost") / 220 + mob.rarity * 0.03 + jar);
 		if (Math.random() > chance) return;
-		const spirit = this.spiritFrom(mob);
 		save.spirits = save.spirits ?? [];
-		if (save.spirits.length < 3) {
-			save.spirits.push(spirit);
-			this.say(`${spirit.name} joins the hunt.`);
-		} else {
-			let weak = 0;
-			for (let i = 1; i < save.spirits.length; i++) if (this.spiritPower(save.spirits[i]!) < this.spiritPower(save.spirits[weak]!)) weak = i;
-			if (this.spiritPower(spirit) <= this.spiritPower(save.spirits[weak]!)) {
-				this.say(`${spirit.name} almost stayed. The party is stronger.`);
-				return;
-			}
-			const gone = save.spirits[weak]!;
-			save.spirits[weak] = spirit;
-			this.say(`${spirit.name} replaces ${gone.name}.`);
+		if (save.spirits.length >= 20) {
+			this.say(`${mob.name} almost stayed. The spirit party is full (20). Dismiss one.`);
+			return;
 		}
+		const spirit = this.spiritFrom(mob);
+		const cap = this.spiritCap();
+		const following = save.spirits.filter((s) => s.active).length;
+		spirit.active = following < cap;
+		save.spirits.push(spirit);
+		this.say(spirit.active ? `${spirit.name} stays, and follows.` : `${spirit.name} stays in the party. Call them out from Spirits.`);
 		this.gainSkill("catching", 16);
 		save.catches[mob.type] = (save.catches[mob.type] ?? 0) + 1;
 		this.noteCatch(mob);
 	}
+	spiritCap() {
+		return 3 + Math.max(0, Math.min(7, this.save?.ghostSlots ?? 0));
+	}
+	activeSpirits() {
+		const save = this.save;
+		if (!save) return [];
+		return (save.spirits ?? []).filter((s) => s.active).slice(0, this.spiritCap());
+	}
 	spiritFrom(mob: Mob): Spirit {
 		const look = mob.look ?? rollGhostLook(mulberry32((Math.random() * 1e9 | 0) || 1), mob.rarity, mob.move, "hunt");
+		const kit = rollSpiritKit(mob.type, mulberry32((Math.random() * 1e9 | 0) || 2), mob.move);
 		const max = Math.max(18, Math.floor(mob.max * 0.72));
 		return {
 			uid: nextUid(), species: mob.species, name: mob.name, type: mob.type, template: mob.template,
-			level: mob.level, rarity: mob.rarity, look, move: mob.move, hp: max, max, speed: Math.max(6, (mob.speed ?? 10) - 1)
+			level: mob.level, rarity: mob.rarity, look, move: kit.slots[0] ?? mob.move, known: kit.known, slots: kit.slots,
+			hp: max, max, speed: Math.max(6, (mob.speed ?? 10) - 1), active: false
 		};
 	}
 	spiritPower(s: Spirit) {
@@ -2110,19 +2210,24 @@ export class TurbzGame {
 				if (this.save.map.startsWith("rift-") || m.id.startsWith("shrine") || m.witch) continue;
 				m.respawn -= dt;
 				if (m.respawn <= 0) {
-					const born = this.makeMob({
-						...m,
-						x: m.homeX,
-						y: m.homeY,
-						species: m.species,
-						level: m.level,
-						boss: m.boss,
-						bossId: m.bossId,
-						template: m.template,
-						type: m.type,
-						animal: m.animal
+					let spec = m;
+					if (m.zone) {
+						const spot = this.zoneSpot(m.zone);
+						const pool = m.zone.species?.length ? m.zone.species : null;
+						const species = pool ? pool[Math.floor(Math.random() * pool.length)] : m.species;
+						const lo = m.zone.levelMin ?? m.level;
+						const hi = m.zone.levelMax ?? m.level;
+						const level = lo + Math.floor(Math.random() * (Math.max(0, hi - lo) + 1));
+						spec = { id: m.id, species, level, x: spot?.x ?? m.homeX, y: spot?.y ?? m.homeY, fixedLevel: true, zone: m.zone, boss: false };
+					}
+					const born = this.makeMob(m.zone ? {
+						id: spec.id, species: spec.species, x: spec.x, y: spec.y, level: spec.level, boss: false, fixedLevel: true, zone: m.zone
+					} : {
+						...spec, boss: m.boss, bossId: m.bossId, template: m.template, type: m.type, animal: m.animal, fixedLevel: false, zone: null
 					});
+					const zone = m.zone;
 					Object.assign(m, born);
+					if (zone) m.zone = zone;
 				}
 				continue;
 			}
@@ -2379,7 +2484,7 @@ export class TurbzGame {
 		if (this.rules === "hardcore") save.bag.trail_ration = 2;
 		save.party = [];
 		save.companion = null;
-		save.spirits = [];
+		save.jarLeft = 0;
 		save.deathBanked = false;
 		const known = [...CLASS_BY_ID[classId].starterMoves];
 		save.innate = known;
@@ -2553,7 +2658,7 @@ export class TurbzGame {
 		const you = this.playerSpeed();
 		const top = foes[0]?.speed ?? 0;
 		const q: TurnStep[] = [];
-		const spirits = (save.spirits ?? []).filter((s) => s.hp > 0);
+		const spirits = this.activeSpirits().filter((s) => s.hp > 0);
 		const pushYou = () => {
 			q.push({ side: "you", id: "you" });
 			for (const s of spirits) q.push({ side: "spirit", id: s.uid });
@@ -2607,23 +2712,58 @@ export class TurbzGame {
 	}
 	spiritTurn(spirit: Spirit) {
 		const save = this.save!;
-		const slot = (save.spirits ?? []).indexOf(spirit);
-		const at = this.mates[slot] ?? { x: save.x - 20, y: save.y, swing: 0 };
-		const foe = this.fightTarget();
-		if (!foe) return;
-		const heal = save.hp < this.maxHp() * 0.42 ? MOVES.find((m) => m.type === spirit.type && moveTactic(m) === "heal") : null;
-		if (heal) {
-			const n = 12 + spirit.level;
-			save.hp = Math.min(this.maxHp(), save.hp + n);
-			this.float(save.x, save.y - 50, `+${n}`, "#9ad8c8");
-			this.playMoveFx(heal, at.x, at.y - 12, save.x, save.y - 16);
+		const moves = (spirit.slots ?? []).map((id) => MOVE_BY_ID[id]).filter(Boolean);
+		if (!moves.length) return;
+		const aid = moves.filter((m) => spiritAidsPlayer(m));
+		let move = null;
+		if (save.hp < this.maxHp() * 0.5) move = aid.find((m) => m.effect === "mend" || moveTactic(m) === "heal") ?? null;
+		if (!move && this.status.length && Math.random() < 0.7) move = aid.find((m) => m.effect === "cleanse") ?? null;
+		if (!move && this.wardT <= 0 && save.hp < this.maxHp() * 0.8) move = aid.find((m) => m.effect === "shell" || moveTactic(m) === "ward") ?? null;
+		if (!move && Math.random() < 0.18) move = aid.find((m) => moveTactic(m) === "surge") ?? null;
+		if (!move) {
+			const offs = moves.filter((m) => !spiritAidsPlayer(m));
+			move = offs.length ? offs[Math.floor(Math.random() * offs.length)] : null;
+		}
+		if (!move) return;
+		if (spiritAidsPlayer(move)) {
+			this.applySpiritAid(spirit, move);
 			return;
 		}
-		const move = MOVE_BY_ID[spirit.move] ?? MOVE_BY_ID[spirit.look.move] ?? MOVES.find((m) => m.type === spirit.type) ?? MOVES[0]!;
+		const foe = this.fightTarget();
+		if (!foe) return;
+		const slot = this.activeSpirits().indexOf(spirit);
+		const at = this.mates[slot] ?? { x: save.x - 20, y: save.y, swing: 0 };
 		at.swing = 1;
-		this.mates[slot] = at;
+		if (slot >= 0) this.mates[slot] = at;
 		this.playMoveFx(move, at.x, at.y - 12, foe.x, foe.y - 12);
 		this.resolveHit(move, foe, true, 0.75 + spirit.rarity * 0.12);
+	}
+	applySpiritAid(spirit, move) {
+		const save = this.save;
+		if (!save) return;
+		const slot = this.activeSpirits().indexOf(spirit);
+		const at = this.mates[slot] ?? { x: save.x - 20, y: save.y, swing: 0 };
+		at.swing = 1;
+		if (slot >= 0) this.mates[slot] = at;
+		this.playMoveFx(move, at.x, at.y - 12, save.x, save.y - 16);
+		const tactic = moveTactic(move);
+		if (move.effect === "cleanse") {
+			this.status = [];
+			this.float(save.x, save.y - 48, "CLEAN", "#fff1a8");
+		} else if (move.effect === "mend" || tactic === "heal") {
+			const n = Math.max(6, Math.floor((move.power || 12) * 0.7 + spirit.level * 1.2));
+			save.hp = Math.min(this.maxHp(), save.hp + n);
+			this.float(save.x, save.y - 50, `+${n}`, "#9ad8c8");
+		} else if (move.effect === "shell" || tactic === "ward") {
+			this.wardT = Math.max(this.wardT, 3.2);
+			this.float(save.x, save.y - 48, "WARD", "#fff1a8");
+		} else if (move.id === "keenwhisper" || move.effect === "expose") {
+			this.buff = { crit: Math.max(this.buff?.crit || 0, 18), ward: this.buff?.ward || 0, t: Math.max(this.buff?.t || 0, 8), type: this.buff?.type };
+			this.float(save.x, save.y - 48, "KEEN", "#e6c15a");
+		} else if (tactic === "surge") {
+			this.addStatus("swift", 4);
+			this.float(save.x, save.y - 48, "HASTE", "#9ad8c8");
+		} else this.float(save.x, save.y - 48, move.name, TYPES[move.type].color);
 	}
 	foeTurn(m: Mob) {
 		const save = this.save!;
@@ -2640,10 +2780,10 @@ export class TurbzGame {
 		}
 		m.cd = (form === "spell" ? 1.05 : form === "ranged" ? 0.72 : 0.48) * (m.boss || m.witch ? 0.85 : 1);
 		m.swing += 1;
-		const spirits = (save.spirits ?? []).filter((s) => s.hp > 0);
+		const spirits = this.activeSpirits().filter((s) => s.hp > 0);
 		if (spirits.length && Math.random() < 0.28) {
 			const spirit = spirits[Math.floor(Math.random() * spirits.length)]!;
-			const slot = (save.spirits ?? []).indexOf(spirit);
+			const slot = this.activeSpirits().indexOf(spirit);
 			const at = this.mates[slot] ?? { x: save.x, y: save.y, swing: 0 };
 			this.playMoveFx(move, m.x, m.y - 16, at.x, at.y - 10);
 			const dmg = Math.max(4, Math.floor(6 + m.level * 1.4 + move.power * 0.08));
@@ -2692,7 +2832,7 @@ export class TurbzGame {
 	tickSpirits(dt: number) {
 		const save = this.save;
 		if (!save) return;
-		const list = save.spirits ?? [];
+		const list = this.activeSpirits();
 		while (this.mates.length < list.length) this.mates.push({ x: save.x, y: save.y, swing: 0 });
 		this.mates.length = list.length;
 		list.forEach((spirit, i) => {
@@ -2932,12 +3072,14 @@ export class TurbzGame {
 		const skill = node === "ore" ? "mining" : node === "tree" ? "woodcutting" : "shroom";
 		const lv = this.save.skills[skill].level;
 		const need = Math.max(.45, 1.15 - lv * .008);
+		this.dest = null;
+		if (this.autoplay) { this.path = []; this.pathI = 0; }
 		this.channel = {
 			kind: `${node}:${id}`, x: this.save.x, y: this.save.y, map: this.save.map,
 			t: 0,
 			need
 		};
-		this.say("Working...");
+		this.say(node === "ore" ? "Mining..." : node === "tree" ? "Chopping..." : "Foraging...");
 	}
 	finishChannel() {
 		this.save;
@@ -2956,6 +3098,7 @@ export class TurbzGame {
 			this.gainSkill("fishing", 16);
 			this.say(`A bite! Fish x${n}.`);
 			this.persist();
+			if (this.autoplay) this.autoPlan = 0;
 			return;
 		}
 		const [node, id] = ch.kind.split(":");
@@ -2966,6 +3109,7 @@ export class TurbzGame {
 		if (node === "ore") {
 			const n = Math.max(1, Math.floor((1 + Math.random()) * luck));
 			this.giveItem("ore", n);
+			if (Math.random() < 0.45) this.giveItem("ironroot", 1);
 			this.gainSkill("mining", 14);
 			this.say(`Ore x${n}.`);
 		} else if (node === "tree") {
@@ -2981,6 +3125,7 @@ export class TurbzGame {
 			this.say("The patch gives.");
 		}
 		this.persist();
+		if (this.autoplay) this.autoPlan = 0;
 	}
 	openTalk(id) {
 		const npc = NPCS.find((n) => n.id === id);
@@ -3163,48 +3308,18 @@ export class TurbzGame {
 		}
 	}
 	catchSpirit() {
+		return this.useSpiritJar();
+	}
+	useSpiritJar() {
 		const save = this.save;
-		const mob = this.nearestMob(save.x, save.y, 70);
-		if (!mob) return this.say("No spirit close.");
+		if (!save) return;
 		if ((save.bag.ghost_jar ?? 0) <= 0) return this.say("Need a ghost jar.");
-		if (mob.boss) return this.say("That one does not fit.");
-		const pct = mob.hp / mob.max;
-		if (pct > .5) return this.say("Soften it first.");
-		const chance = .22 + (1 - pct) * .5 + save.skills.catching.level * .004 + this.chan("catch_boost") / 100;
 		save.bag.ghost_jar -= 1;
-		if (Math.random() > chance) {
-			this.say(`${mob.name} slips the jar.`);
-			return;
-		}
-		const pet = {
-			species: mob.species,
-			level: mob.level,
-			rarity: mob.rarity
-		};
-		if (!save.companion) save.companion = pet;
-		else save.box.push(pet);
-		mob.alive = false;
-		mob.respawn = 20;
-		this.gainSkill("catching", 18);
-		save.catches[mob.type] = (save.catches[mob.type] ?? 0) + 1;
-		if (this.world && biomeNameAt(this.world, save.x, save.y) === "ashen") {
-			if (mob.type === "fire") {
-				const q = save.quests.ember_hunt;
-				if (!q.done) {
-					q.n += 1;
-					if (q.n >= 2) this.completeQuest("ember_hunt");
-				}
-			}
-		}
-		const fires = save.catches.fire ?? 0;
-		const lights = save.catches.light ?? 0;
-		if (fires >= 1 && lights >= 1) {
-			if (!save.quests.keeper_lanterns.done) this.completeQuest("keeper_lanterns");
-		}
-		if (mob.type === "water" && save.quests.marsh_walk.n >= 1 && !save.quests.marsh_walk.done) this.completeQuest("marsh_walk");
-		this.say(`${mob.name} jarred.`);
+		save.jarLeft = 60;
+		this.say("The jar hums. For one minute, fallen foes are much more likely to stay.");
 		this.tone(600, .12, "triangle");
 		this.persist();
+		this.syncHud(true);
 	}
 	turnSalt() {
 		const save = this.save;
@@ -3357,20 +3472,28 @@ export class TurbzGame {
 		const charm = 1 - this.chan("shop_charm") / 140;
 		return Math.max(1, Math.floor(n * shop * charm));
 	}
-	brew(recipe) {
+	brew(recipeId) {
 		const save = this.save;
-		const take = (id, n) => {
-			if ((save.bag[id] ?? 0) < n) return false;
-			save.bag[id] -= n;
-			return true;
-		};
-		if (recipe === "warmth" && take("dreamspore", 1) && take("embercap", 1)) this.giveItem("warmth_tonic", 1);
-		else if (recipe === "ward" && take("ironroot", 1) && take("mushroom", 1)) this.giveItem("ironroot_phial", 1);
-		else if (recipe === "eye" && take("dreamspore", 1) && take("blue_lantern", 1)) this.giveItem("cats_eye", 1);
-		else if (recipe === "meal" && take("fish", 1)) this.giveItem("fish_meal", 1);
-		else return this.say("Missing ingredients.");
-		this.gainSkill(recipe === "meal" ? "fishing" : "alchemy", 18);
-		this.say("Brewed.");
+		if (!save) return;
+		if (recipeId === "meal") {
+			if ((save.bag.fish ?? 0) < 1) return this.say("Need a raw fish.");
+			save.bag.fish -= 1;
+			this.giveItem("fish_meal", 1);
+			this.gainSkill("fishing", 18);
+			this.say("Cooked a fish meal.");
+			this.persist();
+			this.syncHud(true);
+			return;
+		}
+		const recipe = ALCHEMY_RECIPES.find((r) => r.id === recipeId);
+		if (!recipe) return this.say("Unknown recipe.");
+		for (const [id, n] of Object.entries(recipe.costs)) {
+			if ((save.bag[id] ?? 0) < n) return this.say(`Need ${n} ${ITEM_BY_ID[id]?.name ?? id}.`);
+		}
+		for (const [id, n] of Object.entries(recipe.costs)) save.bag[id] -= n;
+		this.giveItem(recipe.output, recipe.n);
+		this.gainSkill("alchemy", 18);
+		this.say(`Brewed ${ITEM_BY_ID[recipe.output]?.name ?? recipe.name}.`);
 		this.persist();
 		this.syncHud(true);
 	}
@@ -3413,12 +3536,78 @@ export class TurbzGame {
 	}
 	summonBox(index) {
 		const save = this.save;
-		const pet = save.box[index];
-		if (!pet) return;
-		if (save.companion) save.box.push(save.companion);
-		save.companion = pet;
+		const pet = save?.box?.[index];
+		if (!save || !pet) return;
+		if ((save.spirits ?? []).length >= 20) return this.say("The spirit party is full.");
+		const def = MONSTER_BY_ID[pet.species] ?? ANIMAL_BY_ID[pet.species];
+		if (!def) return;
+		const kit = rollSpiritKit(def.type, mulberry32((Date.now() ^ index) >>> 0 || 1), pet.move);
+		const max = 30 + (pet.level || 1) * 8;
+		const spirit = {
+			uid: nextUid(), species: pet.species, name: def.name, type: def.type, template: def.template,
+			level: pet.level || 1, rarity: pet.rarity || 0,
+			look: pet.look || rollGhostLook(mulberry32(save.seed || 1), pet.rarity || 0, kit.slots[0] || "measured", "hunt"),
+			move: kit.slots[0] || "measured", known: kit.known, slots: kit.slots, hp: max, max, speed: 8 + (pet.level || 1),
+			active: this.activeSpirits().length < this.spiritCap()
+		};
+		save.spirits = save.spirits ?? [];
+		save.spirits.push(spirit);
 		save.box.splice(index, 1);
-		this.say(`${MONSTER_BY_ID[pet.species]?.name ?? "Spirit"} walks with you.`);
+		this.say(`${def.name} joins the spirit party.`);
+		this.persist();
+		this.syncHud(true);
+	}
+	setSpiritActive(uid, on) {
+		const save = this.save;
+		const spirit = save?.spirits?.find((s) => s.uid === uid);
+		if (!save || !spirit) return;
+		if (on) {
+			const used = save.spirits.filter((s) => s.active && s.uid !== uid).length;
+			if (used >= this.spiritCap()) return this.say(`Only ${this.spiritCap()} spirits can follow. Buy another ghost slot, or call one back.`);
+			spirit.active = true;
+			this.say(`${spirit.name} follows.`);
+		} else {
+			spirit.active = false;
+			this.say(`${spirit.name} waits in the party.`);
+		}
+		this.persist();
+		this.syncHud(true);
+	}
+	dismissSpirit(uid) {
+		const save = this.save;
+		if (!save?.spirits) return;
+		const spirit = save.spirits.find((s) => s.uid === uid);
+		if (!spirit) return;
+		save.spirits = save.spirits.filter((s) => s.uid !== uid);
+		this.say(`${spirit.name} is dismissed.`);
+		this.persist();
+		this.syncHud(true);
+	}
+	toggleSpiritMove(uid, moveId) {
+		const save = this.save;
+		const spirit = save?.spirits?.find((s) => s.uid === uid);
+		if (!spirit || !spirit.known?.includes(moveId)) return;
+		const slots = spirit.slots ?? [];
+		if (slots.includes(moveId)) {
+			if (slots.length <= 1) return this.say("A spirit needs at least one move readied.");
+			spirit.slots = slots.filter((id) => id !== moveId);
+		} else {
+			if (slots.length >= 3) return this.say("Only 3 moves can be readied. Unslot one first.");
+			spirit.slots = [...slots, moveId];
+		}
+		spirit.move = spirit.slots[0] ?? spirit.move;
+		this.persist();
+		this.syncHud(true);
+	}
+	spendGhostSlot() {
+		const save = this.save;
+		if (!save) return;
+		if ((save.skillPoints ?? 0) < 1) return this.say("Need a skill point.");
+		if ((save.ghostSlots ?? 0) >= 7) return this.say("No more ghost slots. Ten spirits is the hunt's limit.");
+		save.skillPoints -= 1;
+		save.ghostSlots = (save.ghostSlots ?? 0) + 1;
+		this.say(`Ghost slots ${this.spiritCap()}. Another spirit can follow.`);
+		this.persist();
 		this.syncHud(true);
 	}
 	takeBounty() {
@@ -3655,6 +3844,60 @@ export class TurbzGame {
 				});
 			}
 			save.companion = null;
+		}
+		save.ghostSlots = Math.max(0, Math.min(7, save.ghostSlots | 0));
+		save.jarLeft = Math.max(0, save.jarLeft || 0);
+		save.box = save.box ?? [];
+		save.spirits = save.spirits ?? [];
+		for (const pet of save.box) {
+			if (save.spirits.length >= 20) break;
+			const def = MONSTER_BY_ID[pet.species] ?? ANIMAL_BY_ID[pet.species];
+			if (!def) continue;
+			const kit = rollSpiritKit(def.type, mulberry32(((pet.level || 1) * 997 + (pet.rarity || 0) * 13) >>> 0 || 1), pet.move);
+			const max = pet.max ?? 30 + (pet.level || 1) * 8;
+			save.spirits.push({
+				uid: nextUid(), species: pet.species, name: pet.name || def.name, type: pet.type || def.type, template: pet.template ?? def.template,
+				level: pet.level || 1, rarity: pet.rarity || 0,
+				look: pet.look || rollGhostLook(mulberry32((save.seed || 1) + save.spirits.length), pet.rarity || 0, kit.slots[0] || "measured", "hunt"),
+				move: kit.slots[0] || "measured", known: kit.known, slots: kit.slots,
+				hp: pet.hp ?? max, max, speed: pet.speed ?? 8 + (pet.level || 1), active: false
+			});
+		}
+		save.box = [];
+		if (save.spirits.length > 20) save.spirits.length = 20;
+		const cap = 3 + save.ghostSlots;
+		let following = 0;
+		for (const s of save.spirits) {
+			if (!Array.isArray(s.known) || !s.known.length) {
+				const kit = rollSpiritKit(s.type, mulberry32(((s.level || 1) * 17 + (s.name?.length || 1) * 31) >>> 0 || 1), s.move);
+				s.known = kit.known;
+				s.slots = kit.slots;
+			}
+			s.known = [...new Set(s.known)].filter((id) => MOVE_BY_ID[id]).slice(0, 10);
+			if (s.known.length < 3) {
+				const kit = rollSpiritKit(s.type, mulberry32(s.known.length + 5), s.move);
+				for (const id of kit.known) if (!s.known.includes(id) && s.known.length < 10) s.known.push(id);
+			}
+			s.slots = (Array.isArray(s.slots) ? s.slots : [s.move]).filter((id) => s.known.includes(id)).slice(0, 3);
+			while (s.slots.length < Math.min(3, s.known.length)) {
+				const id = s.known.find((k) => !s.slots.includes(k));
+				if (!id) break;
+				s.slots.push(id);
+			}
+			s.move = s.slots[0] ?? s.move ?? "measured";
+			if (s.hp == null) s.hp = s.max ?? 30;
+			if (s.max == null) s.max = Math.max(s.hp, 30);
+			if (s.active) {
+				if (following < cap) following += 1;
+				else s.active = false;
+			}
+		}
+		if (!following) {
+			for (const s of save.spirits) {
+				if (following >= cap) break;
+				s.active = true;
+				following += 1;
+			}
 		}
 		if (!save.innate?.length) {
 			const seed = save.seed || 1;
@@ -4338,7 +4581,32 @@ export class TurbzGame {
 				shrine: npc.shrine ?? null
 			} : null,
 			shrine: this.shrine ? `${TYPES[this.shrine.type].name} shrine · round ${this.shrine.round}/3` : "",
-			companion: (save.spirits ?? []).filter((s) => s.hp > 0).map((s) => `${s.name} lv${s.level}`).join(", ") || "No spirits",
+			companion: this.activeSpirits().filter((s) => s.hp > 0).map((s) => `${s.name} lv${s.level}`).join(", ") || "No spirits out",
+			spirits: (save.spirits ?? []).map((s) => ({
+				uid: s.uid,
+				name: s.name,
+				type: s.type,
+				level: s.level,
+				rarity: s.rarity,
+				hp: Math.max(0, Math.ceil(s.hp)),
+				max: Math.max(1, Math.ceil(s.max)),
+				active: !!s.active,
+				slots: s.slots ?? [],
+				known: (s.known ?? []).map((id) => {
+					const m = MOVE_BY_ID[id];
+					return {
+						id,
+						name: m?.name ?? id,
+						about: m?.about ?? "",
+						type: m?.type ?? s.type,
+						player: m ? spiritAidsPlayer(m) : false,
+						slotted: (s.slots ?? []).includes(id)
+					};
+				})
+			})),
+			spiritSlots: this.spiritCap(),
+			spiritCap: 20,
+			jarLeft: Math.ceil(save.jarLeft ?? 0),
 			accountScore: save.accountScore ?? 0,
 			turn: this.duel ? (this.duel.phase === "yours" ? "Your verse" : `${this.duel.lead?.name ?? "They"} readies`) : this.turnQ[0] ? (this.turnQ[0].side === "you" ? "Your turn" : this.turnQ[0].side === "spirit" ? "Spirit" : "Enemy") : "",
 			survival: this.rules === "hardcore" ? { ...save.survival } : null,
@@ -4390,7 +4658,7 @@ export class TurbzGame {
 			net: snap.net,
 			roomCode: snap.roomCode,
 			peers: snap.peers,
-			aim: this.castLock > 0 ? "Casting..." : this.channel ? "Gathering..." : "Right-click for menus. Walk into a node. Click a keeper you are near.",
+			aim: this.castLock > 0 ? "Casting..." : this.channel ? (this.channel.kind === "fishing" ? "Fishing..." : "Gathering...") : "Press E beside a node or the water. Right-click for menus.",
 			hint: this.hint,
 			foe: (() => {
 				const mob = this.nearestMob(save.x, save.y, 230);
@@ -4618,7 +4886,7 @@ export class TurbzGame {
 				"legendary"
 			].indexOf(g.quality)
 		}));
-		(save.spirits ?? []).forEach((spirit, i) => {
+		this.activeSpirits().forEach((spirit, i) => {
 			const at = this.mates[i];
 			if (!at || spirit.hp <= 0) return;
 			drawMonster(ctx, {
@@ -4737,6 +5005,11 @@ export class TurbzGame {
 			scale: 1
 		});
 		drawShadowName(ctx, save.name, save.x, save.y - 44, "#fff6e8");
+		if (!this.channel && !this.dead && !this.sleeping) {
+			const node = this.nodeNear(null, 56);
+			const prompt = node ? (node.node === "ore" ? "E  Mine" : node.node === "tree" ? "E  Chop" : "E  Forage") : nearestWaterTile(this.world, save.x, save.y, 64) ? "E  Fish" : "";
+			if (prompt) drawShadowName(ctx, prompt, save.x, save.y - 62, "#e6c15a");
+		}
 		if (this.combat > 0 || this.wardT > 0) {
 			const pct = Math.max(0, save.hp / this.maxHp());
 			ctx.fillStyle = "#1a1214";
@@ -4935,11 +5208,15 @@ export class TurbzGame {
 			},
 			{
 				id: "menu:ghost",
-				label: "Spirit"
+				label: "Spirits"
+			},
+			{
+				id: "menu:craft",
+				label: "Crafting"
 			},
 			{
 				id: "menu:jar",
-				label: "Jar"
+				label: "Use ghost jar"
 			},
 			{
 				id: "menu:bounty",
@@ -5015,7 +5292,7 @@ export class TurbzGame {
 		}
 		for (const node of this.world.spawns) if (node.kind === "node" && Math.hypot(node.x - x, node.y - y) < 40) {
 			const info = { tree: ["Tree · chop for logs", "Resource tree", "Chop logs to build a campfire, cook meals, and purify water.", "Chop logs"], ore: ["Ore vein · mine", "Ore vein", "Mine ore to sell at Crownfall.", "Mine ore"], shroom: ["Mushroom patch · forage", "Mushroom patch", "Forage mushrooms and alchemy spores.", "Forage"] }[node.node];
-			if (info) return { hint: info[0], title: info[1], lines: [info[2], "Gathering destroys it. Another one grows somewhere else."], actions: [{ id: `chop:${node.id}`, label: info[3] }] };
+			if (info) return { hint: info[0], title: info[1], lines: [info[2], "Press E beside it. Gathering destroys it. Another one grows somewhere else."], actions: [{ id: `chop:${node.id}`, label: info[3] }] };
 		}
 		const tileAt = this.world.tiles[Math.floor(y / 32) * this.world.w + Math.floor(x / 32)];
 		if (tileAt && tileAt.floor === 2) return {

@@ -609,7 +609,7 @@
 .effect-chip { font-size: 15px; line-height: 1; padding: 2px 5px; border: 2px solid currentColor; background: #0d0908; }
 .effect-good { color: #9ad8c8; }
 .effect-bad { color: #e2735a; }
-.hud-actions { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 4px; margin-top: 2px; }
+.hud-actions { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; margin-top: 2px; }
 .hud-icon-btn { position: relative; display: flex; flex-direction: column; align-items: center; gap: 1px; padding: 5px 2px 3px; border: 2px solid var(--color-bone); background: var(--color-ink); color: var(--color-bone); box-shadow: 2px 2px 0 var(--color-blood); transition: transform 100ms ease, background-color 120ms ease, color 120ms ease; }
 .hud-icon-btn:hover { transform: translateY(-2px); background: #2e1d18; color: var(--color-kyo); }
 .hud-icon-btn:active { transform: translate(1px, 1px); box-shadow: none; }

@@ -1,10 +1,22 @@
 import type { Spawn, Tile as WorldTile, WorldData } from "./world";
-import { TILE, WORLD_H, WORLD_W, MONSTER_BY_ID, ANIMAL_BY_ID } from "./content";
+import { TILE, WORLD_H, WORLD_W, MONSTER_BY_ID, ANIMAL_BY_ID, MONSTERS } from "./content";
 import { findAtlasTile } from "./tile-atlas";
 
 export const MAP_VERSION = 1;
 
 export type Portal = { map: string; tx?: number; ty?: number };
+export type SpawnZone = {
+  id: string;
+  tx: number;
+  ty: number;
+  tw: number;
+  th: number;
+  levelMin: number;
+  levelMax: number;
+  species: string[];
+  count: number;
+  respawn: number;
+};
 export type MapTile = WorldTile & {
   sprite?: string;
   layers?: string[];
@@ -32,6 +44,8 @@ export type MapFile = {
   tileSize: number;
   tiles: MapTile[];
   spawns?: Spawn[];
+  /** Enemy camps. Foes of the chosen types appear inside the rectangle. */
+  zones?: SpawnZone[];
   spawn?: { tx: number; ty: number };
   notes?: string;
   kind?: "bossroom" | "dungeon" | "world";
@@ -82,6 +96,7 @@ export function emptyMap(id: string, name: string, w: number, h: number, floor =
     tileSize: TILE,
     tiles,
     spawns: [],
+    zones: [],
     spawn: { tx: Math.floor(w / 2), ty: Math.floor(h / 2) },
   };
 }
@@ -155,7 +170,66 @@ export function parseMapJson(raw: unknown): MapFile {
     ids.add(s.id);
     return { ...s };
   });
-  return { version: MAP_VERSION, id: typeof m.id === "string" ? m.id.slice(0, 80) : "custom", name: typeof m.name === "string" ? m.name.slice(0, 100) : "Custom Map", w: m.w!, h: m.h!, tileSize: TILE, tiles, spawns, spawn, notes: typeof m.notes === "string" ? m.notes.slice(0, 2000) : undefined, kind: ["bossroom", "dungeon", "world"].includes(m.kind ?? "") ? m.kind : "world" };
+  return { version: MAP_VERSION, id: typeof m.id === "string" ? m.id.slice(0, 80) : "custom", name: typeof m.name === "string" ? m.name.slice(0, 100) : "Custom Map", w: m.w!, h: m.h!, tileSize: TILE, tiles, spawns, zones: parseZones(m.zones, m.w!, m.h!), spawn, notes: typeof m.notes === "string" ? m.notes.slice(0, 2000) : undefined, kind: ["bossroom", "dungeon", "world"].includes(m.kind ?? "") ? m.kind : "world" };
+}
+
+function parseZones(raw: unknown, w: number, h: number): SpawnZone[] {
+  if (raw == null) return [];
+  if (!Array.isArray(raw) || raw.length > 80) throw new Error("Invalid spawn zones (maximum 80).");
+  const ids = new Set<string>();
+  return raw.map((z) => {
+    if (!z || typeof z !== "object") throw new Error("Invalid spawn zone.");
+    const q = z as SpawnZone;
+    const num = (v: unknown, min: number, max: number) => Number.isInteger(v) && (v as number) >= min && (v as number) <= max;
+    if (typeof q.id !== "string" || !q.id || ids.has(q.id)) throw new Error("Spawn zones need unique ids.");
+    ids.add(q.id);
+    if (!num(q.tx, 0, w - 1) || !num(q.ty, 0, h - 1) || !num(q.tw, 1, w) || !num(q.th, 1, h) || q.tx + q.tw > w || q.ty + q.th > h) throw new Error("Spawn zone is outside the map.");
+    if (!num(q.levelMin, 1, 100) || !num(q.levelMax, 1, 100) || q.levelMin > q.levelMax) throw new Error("Spawn zone levels must be from 1 to 100.");
+    if (!num(q.count, 1, 40) || !num(q.respawn, 5, 600)) throw new Error("Spawn zone count must be 1–40 and respawn 5–600 seconds.");
+    if (!Array.isArray(q.species) || q.species.length > 40 || !q.species.every((id) => typeof id === "string" && !!(MONSTER_BY_ID[id] || ANIMAL_BY_ID[id]))) throw new Error("Spawn zone has an unknown enemy type.");
+    return { id: q.id, tx: q.tx, ty: q.ty, tw: q.tw, th: q.th, levelMin: q.levelMin, levelMax: q.levelMax, species: [...q.species], count: q.count, respawn: q.respawn };
+  });
+}
+
+/** Turn designer zones into live mob spawns on walkable tiles inside each rectangle. */
+export function expandZones(map: MapFile): Spawn[] {
+  const out: Spawn[] = [];
+  const fallback = MONSTERS.map((m) => m.id);
+  for (const z of map.zones ?? []) {
+    const spots: { x: number; y: number }[] = [];
+    for (let ty = z.ty; ty < z.ty + z.th; ty++) {
+      for (let tx = z.tx; tx < z.tx + z.tw; tx++) {
+        if (tx < 0 || ty < 0 || tx >= map.w || ty >= map.h) continue;
+        const t = map.tiles[ty * map.w + tx];
+        if (!t || t.block || t.floor === 1 || t.floor === 2) continue;
+        spots.push({ x: (tx + 0.5) * TILE, y: (ty + 0.5) * TILE });
+      }
+    }
+    for (let i = spots.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      const tmp = spots[i]!;
+      spots[i] = spots[j]!;
+      spots[j] = tmp;
+    }
+    const pool = z.species.filter((id) => MONSTER_BY_ID[id] || ANIMAL_BY_ID[id]);
+    const n = Math.min(z.count, spots.length);
+    for (let i = 0; i < n; i++) {
+      const species = (pool.length ? pool : fallback)[Math.floor(Math.random() * (pool.length || fallback.length))]!;
+      const level = z.levelMin + Math.floor(Math.random() * (z.levelMax - z.levelMin + 1));
+      const spot = spots[i]!;
+      out.push({
+        id: `${z.id}-${i}`,
+        kind: "mob",
+        species,
+        x: spot.x,
+        y: spot.y,
+        level,
+        fixedLevel: true,
+        zone: { ...z, species: pool },
+      });
+    }
+  }
+  return out;
 }
 
 export function downloadMapFile(map: MapFile): void {

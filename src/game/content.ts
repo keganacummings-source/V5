@@ -107,6 +107,8 @@ export type Move = {
   fail?: number;
   /** Overrides the derived attack form. */
   form?: AttackForm;
+  /** Spirit aid verses land on the witch instead of a foe. */
+  target?: "foe" | "player";
 };
 
 export type Tactic = "strike" | "blink" | "ward" | "lunge" | "heavy" | "channel" | "heal" | "roll" | "dash" | "surge";
@@ -278,9 +280,59 @@ export const MOVES: Move[] = [
   { id: "pirouette", name: "Pirouette", type: "air", power: 10, accuracy: 100, crit: 10, priority: 3, effect: "none", anim: ["spiral", "slash"], range: 96, about: "Spin out of the blow with a flick of steel.", tactic: "roll", react: "roll", fail: 10 },
   { id: "batswarm", name: "Bat Swarm", type: "ghoul", power: 18, accuracy: 96, crit: 12, priority: 3, effect: "leech", anim: ["orbit", "slash"], range: 170, about: "Burst into bats and reform beside them.", tactic: "blink", react: "move", fail: 20 },
   { id: "arcblink", name: "Arc Blink", type: "electric", power: 18, accuracy: 100, crit: 10, priority: 3, effect: "spark", anim: ["spark", "beam"], range: 170, about: "Ride a lightning arc to their side.", tactic: "blink", react: "move", fail: 18 },
+  { id: "spiritmend", name: "Spirit Mend", type: "spirit", power: 36, accuracy: 100, crit: 0, priority: 2, effect: "mend", anim: ["orbit", "shield"], range: 40, about: "Knit the witch's wounds from the veil.", tactic: "heal", target: "player" },
+  { id: "lanternguard", name: "Lantern Guard", type: "light", power: 0, accuracy: 100, crit: 0, priority: 3, effect: "shell", anim: ["shield", "prism"], range: 40, about: "A lantern ward around the witch.", tactic: "ward", target: "player" },
+  { id: "keenwhisper", name: "Keen Whisper", type: "spirit", power: 0, accuracy: 100, crit: 0, priority: 2, effect: "expose", anim: ["orbit", "spark"], range: 40, about: "Sharpen the witch's next cuts.", tactic: "surge", target: "player" },
+  { id: "ghoststep", name: "Ghost Step", type: "air", power: 0, accuracy: 100, crit: 0, priority: 3, effect: "none", anim: ["orbit", "spiral"], range: 40, about: "The witch moves like a haunt for a few seconds.", tactic: "surge", target: "player" },
+  { id: "unhex", name: "Unhex", type: "light", power: 0, accuracy: 100, crit: 0, priority: 3, effect: "cleanse", anim: ["prism", "shield"], range: 40, about: "Pull a hex off the witch.", tactic: "heal", target: "player" },
+  { id: "emberheart", name: "Ember Heart", type: "fire", power: 18, accuracy: 100, crit: 0, priority: 2, effect: "mend", anim: ["spark", "shield"], range: 40, about: "A warm coal of mending for the witch.", tactic: "heal", target: "player" },
+  { id: "brinebless", name: "Brine Blessing", type: "water", power: 22, accuracy: 100, crit: 0, priority: 2, effect: "mend", anim: ["rain", "shield"], range: 40, about: "Salt water that closes a cut.", tactic: "heal", target: "player" },
+  { id: "rootward", name: "Root Ward", type: "earth", power: 0, accuracy: 100, crit: 0, priority: 2, effect: "shell", anim: ["spiral", "shield"], range: 40, about: "Roots stand between the witch and the blow.", tactic: "ward", target: "player" },
+  { id: "frostmail", name: "Frost Mail", type: "ice", power: 0, accuracy: 100, crit: 0, priority: 3, effect: "shell", anim: ["prism", "shield"], range: 40, about: "A coat of rime on the witch.", tactic: "ward", target: "player" },
+  { id: "voidshelter", name: "Void Shelter", type: "void", power: 0, accuracy: 100, crit: 0, priority: 2, effect: "shell", anim: ["orbit", "shield"], range: 40, about: "The dark leans over the witch.", tactic: "ward", target: "player" },
+  { id: "sparkhaste", name: "Spark Haste", type: "electric", power: 0, accuracy: 100, crit: 0, priority: 3, effect: "none", anim: ["spark", "spiral"], range: 40, about: "Lightning in the witch's heels.", tactic: "surge", target: "player" },
+  { id: "ghoulgift", name: "Ghoul Gift", type: "ghoul", power: 16, accuracy: 100, crit: 0, priority: 1, effect: "mend", anim: ["orbit", "slash"], range: 40, about: "A sip of stolen life, offered back.", tactic: "heal", target: "player" },
 ];
 
 export const MOVE_BY_ID: Record<string, Move> = Object.fromEntries(MOVES.map((m) => [m.id, m]));
+
+/** Verses a spirit spends on the witch: heals, wards, haste, and marked aid spells. */
+export function spiritAidsPlayer(m: Move): boolean {
+  if (m.target === "foe") return false;
+  if (m.target === "player") return true;
+  const tactic = moveTactic(m);
+  return m.effect === "mend" || m.effect === "shell" || m.effect === "cleanse" || tactic === "heal" || tactic === "ward" || tactic === "surge";
+}
+
+/** Up to 10 known verses from the spirit's type. Three of them start readied. */
+export function rollSpiritKit(type: TypeId, rng: Rng, prefer?: string): { known: string[]; slots: string[] } {
+  const attacks = MOVES.filter((m) => !spiritAidsPlayer(m) && (m.type === type || m.type === "spirit"));
+  const aid = MOVES.filter((m) => spiritAidsPlayer(m) && (m.target === "player" || m.type === type || m.type === "spirit"));
+  const known: string[] = [];
+  const add = (id?: string) => {
+    if (!id || !MOVE_BY_ID[id] || known.includes(id) || known.length >= 10) return;
+    known.push(id);
+  };
+  if (prefer && MOVE_BY_ID[prefer] && !spiritAidsPlayer(MOVE_BY_ID[prefer]!)) add(prefer);
+  if (aid.length) add(pick(rng, aid).id);
+  if (aid.length > 1 && rng() < 0.5) add(pick(rng, aid).id);
+  const pool = attacks.length ? attacks : MOVES.filter((m) => !spiritAidsPlayer(m));
+  const want = Math.min(10, 4 + irand(rng, 7));
+  let guard = 0;
+  while (known.length < want && pool.length && guard++ < 48) add(pick(rng, pool).id);
+  const slots: string[] = [];
+  const firstAid = known.find((id) => spiritAidsPlayer(MOVE_BY_ID[id]!));
+  if (firstAid) slots.push(firstAid);
+  for (const id of known) {
+    if (slots.length >= 3) break;
+    if (!spiritAidsPlayer(MOVE_BY_ID[id]!) && !slots.includes(id)) slots.push(id);
+  }
+  for (const id of known) {
+    if (slots.length >= 3) break;
+    if (!slots.includes(id)) slots.push(id);
+  }
+  return { known, slots };
+}
 
 const MELEE_IDS = new Set(["cinder", "grin", "thorn", "bite", "rattle", "measured", "brine"]);
 const SPELL_IDS = new Set(["dirge", "storm", "howl", "quake", "whiteout", "flash", "hex", "shroud", "dawn", "creep", "marrow", "vine", "ember", "tide"]);
@@ -837,7 +889,7 @@ export const ITEMS: ItemDef[] = [
   { id: "drinking_water", name: "Drinking Water", about: "Purified on a campfire. Restores 50 thirst.", price: 0 },
   { id: "potion", name: "Potion", about: "Mends a modest wound.", price: 18, heal: 45 },
   { id: "big_potion", name: "Big Potion", about: "The good bottle.", price: 48, heal: 110 },
-  { id: "ghost_jar", name: "Ghost Jar", about: "Catches a weakened spirit.", price: 26 },
+  { id: "ghost_jar", name: "Ghost Jar", about: "Crack it to raise the chance a fallen foe stays as a spirit. Lasts one minute.", price: 26 },
   { id: "cleanse_salt", name: "Cleanse Salt", about: "Clears a hex. Quest salt.", price: 14 },
   { id: "spirit_candy", name: "Spirit Candy", about: "A rush of spirit.", price: 22, heal: 30 },
   { id: "smoke_bomb", name: "Smoke Bomb", about: "Step out of a fight.", price: 20 },
@@ -858,6 +910,24 @@ export const ITEMS: ItemDef[] = [
 ];
 
 export const ITEM_BY_ID: Record<string, ItemDef> = Object.fromEntries(ITEMS.map((i) => [i.id, i]));
+
+export type AlchemyRecipe = {
+  id: string;
+  name: string;
+  about: string;
+  costs: Record<string, number>;
+  output: string;
+  n: number;
+};
+
+export const ALCHEMY_RECIPES: AlchemyRecipe[] = [
+  { id: "warmth", name: "Warmth Tonic", about: "Spore and embercap. Heals, and favors fire.", costs: { dreamspore: 1, embercap: 1 }, output: "warmth_tonic", n: 1 },
+  { id: "ward", name: "Ironroot Phial", about: "Root and a shroom. A bark ward.", costs: { ironroot: 1, mushroom: 1 }, output: "ironroot_phial", n: 1 },
+  { id: "eye", name: "Cat's Eye Draught", about: "Spore and a blue lantern. Crits come easier.", costs: { dreamspore: 1, blue_lantern: 1 }, output: "cats_eye", n: 1 },
+  { id: "potion", name: "Potion", about: "Two shrooms and an embercap. A modest mend.", costs: { mushroom: 2, embercap: 1 }, output: "potion", n: 1 },
+  { id: "big", name: "Big Potion", about: "The long brew. Two roots, a spore, a lantern.", costs: { ironroot: 2, dreamspore: 1, blue_lantern: 1 }, output: "big_potion", n: 1 },
+  { id: "candy", name: "Spirit Candy", about: "Spore, shroom, and lantern light. A rush of spirit.", costs: { dreamspore: 1, mushroom: 1, blue_lantern: 1 }, output: "spirit_candy", n: 1 },
+];
 
 export type QuestDef = {
   id: string;
