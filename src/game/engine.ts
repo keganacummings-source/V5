@@ -30,6 +30,8 @@ import {
   TILE,
   TYPES,
   WITCH_NAMES,
+  CLASSES,
+  CLASS_RACE,
   accountNeed,
   attackForm,
   attackRange,
@@ -159,6 +161,7 @@ export type Snap = {
   perks: { id: string; name: string; power: number; about: string }[];
   bounty: string;
   bountyPlace: string;
+  unstuck: number;
   unlocked: { id: string; name: string; race: RaceId; bonus: string }[];
   hint: string;
   foe: string;
@@ -204,6 +207,8 @@ type Mob = {
   rarity: number; direction: ActorDirection; facing: number; walk: number; swing: number; move: string; animal: boolean; witch: boolean;
   race: RaceId | null; lootGear: Gear[]; lootBag: Record<string, number>; lootKyo: number; huntIn: number; seen: boolean;
   ghost?: boolean; look?: GhostLook | null; speed?: number; master?: string; aggro?: boolean;
+  classId?: string; female?: boolean; bounty?: boolean; bountySpirit?: boolean; map?: string;
+  power?: number; enraged?: boolean; baseMax?: number; moving?: boolean;
   zone?: { id: string; tx: number; ty: number; tw: number; th: number; levelMin: number; levelMax: number; species: string[]; count: number; respawn: number } | null;
 };
 type Spirit = {
@@ -289,6 +294,7 @@ const emptySnap = (): Snap => ({
 	perks: [],
 	bounty: "",
 	bountyPlace: "",
+	unstuck: 0,
 	unlocked: [],
 	hint: "",
 	foe: "",
@@ -404,6 +410,9 @@ export class TurbzGame {
 		this.castLock = 0;
 		this.rules = "hunt";
 		this.duel = null;
+		this.contract = [];
+		this.unstuckT = 0;
+		this.mouseWorld = null;
 		this.defFatigue = 0;
 		this.duelAllow = false;
 		this.partyIn = 36;
@@ -542,6 +551,7 @@ export class TurbzGame {
 		}, options);
 		this.canvas.addEventListener("pointermove", (e) => {
 			const w = this.screenToWorld(e.clientX, e.clientY);
+			this.mouseWorld = w;
 			this.hoverAt(w.x, w.y);
 			if (!this.pointer?.down) return;
 			this.pointer = {
@@ -550,6 +560,9 @@ export class TurbzGame {
 				down: true
 			};
 			this.pointAt(w.x, w.y);
+		}, options);
+		window.addEventListener("pointermove", (e) => {
+			this.mouseWorld = this.screenToWorld(e.clientX, e.clientY);
 		}, options);
 		this.canvas.addEventListener("pointerup", () => {
 			if (this.pointer) this.pointer.down = false;
@@ -723,6 +736,8 @@ export class TurbzGame {
 		this.save = save;
 		this.overworld = buildWorld(save.seed, this.rules === "hardcore");
 		this.mobs = [];
+		this.contract = [];
+		this.unstuckT = 0;
 		this.dead = !!save.deathBanked;
 		this.secondUsed = false;
 		this.status = [];
@@ -782,11 +797,13 @@ export class TurbzGame {
 			this.world = buildDungeon(map, save.seed);
 			paintWorld(this.world);
 		}
-		const witch = this.mobs.find((m) => m.witch && m.alive) ?? null;
+		const witch = this.mobs.find((m) => m.witch && m.alive && !m.bounty && !m.bountySpirit) ?? null;
+		this.stashContract();
 		if (freshMobs || this.mobs.length === 0 || map !== "world") {
 			this.mobs = this.world.spawns.filter((s) => s.kind === "mob").map((s) => this.makeMob(s));
 			if (map === "world" && witch) this.mobs.push(witch);
 		}
+		this.restoreContract(map);
 		save.map = map;
 	}
 	makeMob(s) {
@@ -860,12 +877,15 @@ export class TurbzGame {
 			this.vy = 0;
 			return;
 		}
+		if (document.hidden) return;
+		if (this.role !== "guest") this.tickContract(dt);
+		this.tickUnstuck(dt);
 		if (snap.panel === "pause" || snap.panel === "death") {
 			this.vx = 0;
 			this.vy = 0;
+			if (this.unstuckT > 0 || this.liveBounty()) this.syncHud(false);
 			return;
 		}
-		if (document.hidden) return;
 		if (this.role !== "guest") this.tickDungeons(dt);
 		this.tickPlayer(dt);
 		if (this.dead) return;
@@ -1945,14 +1965,25 @@ export class TurbzGame {
 		this.say(`${mob.name} falls.`);
 		this.tone(90, .08, "triangle");
 		this.questKill(mob);
-		if (mob.witch) {
+		if (mob.witch || mob.bounty) {
+			if (mob.bounty) {
+				for (const pool of [this.mobs, this.contract ?? []]) {
+					for (const s of pool) if (s.bountySpirit && s.master === mob.id) {
+						s.alive = false;
+						s.hp = 0;
+					}
+				}
+				this.contract = (this.contract ?? []).filter((m) => m.alive);
+			}
 			for (const g of mob.lootGear) this.receiveGear({
 				...g,
 				uid: nextUid()
 			});
 			for (const [id, n] of Object.entries(mob.lootBag)) if (n > 0) this.giveItem(id, n);
 			save.kyo += mob.lootKyo;
-			this.say(`${mob.name} drops everything. ${mob.lootKyo} kyo, her bag, her gear.`);
+			this.say(mob.bounty
+				? `${mob.name} drops everything they carried. ${mob.lootKyo} kyo and ${mob.lootGear.length} pieces of gear.`
+				: `${mob.name} drops everything. ${mob.lootKyo} kyo, her bag, her gear.`);
 			this.gainSkill("hunting", 24);
 			this.gainAccount(40 + mob.level * 4);
 			this.persist();
@@ -2207,7 +2238,7 @@ export class TurbzGame {
 			m.status.forEach((s) => s.t -= dt);
 			m.status = m.status.filter((s) => s.t > 0);
 			if (!m.alive) {
-				if (this.save.map.startsWith("rift-") || m.id.startsWith("shrine") || m.witch) continue;
+				if (this.save.map.startsWith("rift-") || m.id.startsWith("shrine") || m.witch || m.bounty || m.bountySpirit) continue;
 				m.respawn -= dt;
 				if (m.respawn <= 0) {
 					let spec = m;
@@ -2249,8 +2280,12 @@ export class TurbzGame {
 				} else if (!rooted) m.x += Math.sin(m.walk) * 10 * dt;
 				continue;
 			}
-			if (m.witch) {
+			if (m.witch || m.bounty) {
 				this.tickWitch(m, save.x, save.y, d, dx, dy, dt);
+				continue;
+			}
+			if (m.bountySpirit) {
+				this.tickBountySpirit(m, dt);
 				continue;
 			}
 			const aggro = this.wantsFight(m, d);
@@ -2288,33 +2323,63 @@ export class TurbzGame {
 		const hit = (px, py) => blocked(world, px, py) || blocked(world, px - 7, py) || blocked(world, px + 7, py) || blocked(world, px, py - 6);
 		if (!hit(m.x + dx, m.y)) m.x += dx;
 		if (!hit(m.x, m.y + dy)) m.y += dy;
+		m.moving = m.x !== x || m.y !== y;
 		m.direction = directionFromDelta(m.x - x, m.y - y, m.direction);
 		if (m.x !== x) m.facing = m.x < x ? -1 : 1;
 	}
 	tickWitch(m, px, py, d, dx, dy, dt) {
-		if (m.huntIn > 0) {
+		m.moving = false;
+		if (!m.bounty && m.huntIn > 0) {
 			m.huntIn -= dt;
 			if (m.huntIn <= 0) this.say(`${m.name} is done waiting. She is hunting you.`);
 		}
-		const hunting = m.huntIn <= 0;
-		if (d < 280 && !m.seen) {
+		const hunting = m.bounty ? !!m.enraged : m.huntIn <= 0;
+		if (m.bounty && !hunting) {
+			if (d < 200 || m.hurt > 0) {
+				if (!m.seen) this.say(`${m.name} turns to face you.`);
+				m.seen = true;
+			} else if (d > 360) m.seen = false;
+		} else if ((d < 280 || m.hurt > 0) && !m.seen) {
 			m.seen = true;
 			this.say(`${m.name} knows you are here.`);
 		}
 		const rooted = m.status.some((s) => s.id === "root");
 		m.cd -= dt;
+		const engage = hunting || m.seen;
+		const agility = m.classId && CLASS_BY_ID[m.classId] ? 1 + Math.max(-.25, (CLASS_BY_ID[m.classId].stats.speed ?? 0) / 180) : 1;
 		if (!rooted && d > 4) {
-			if ((hunting || m.seen) && d > 108) {
-				this.moveMob(m, dx / d * (hunting ? 86 : 54) * dt, dy / d * (hunting ? 86 : 54) * dt);
+			if (engage && d > (hunting ? 42 : 96)) {
+				const sp = (hunting ? 188 : 64) * agility;
+				this.moveMob(m, dx / d * sp * dt, dy / d * sp * dt);
 				m.facing = dx < 0 ? -1 : 1;
-			} else if (!hunting && !m.seen) {
+			} else if (!engage) {
 				const hx = m.homeX - m.x;
 				const hy = m.homeY - m.y;
 				const hd = Math.hypot(hx, hy);
 				if (hd > 36) this.moveMob(m, hx / hd * 26 * dt, hy / hd * 26 * dt);
 			}
 		}
-		if (!(hunting || m.seen) || this.role === "guest") return;
+		if (!engage) m.aggro = false;
+		if (m.bounty && hunting && this.world) {
+			m.chaseT = (m.chaseT ?? 0) + dt;
+			if (m.chaseT > 2.2) {
+				m.chaseT = 0;
+				if (d > 200 && d > (m.chaseD ?? d) - 16) {
+					const step = Math.min(Math.max(64, d - 90), 320);
+					const at = nearestOpen(this.world, m.x + (dx / Math.max(d, 1)) * step, m.y + (dy / Math.max(d, 1)) * step);
+					m.x = at.x;
+					m.y = at.y;
+					const pack = this.mobs.filter((s) => s.bountySpirit && s.master === m.id && s.alive);
+					pack.forEach((s, i) => {
+						const pet = nearestOpen(this.world, at.x + (i - 1) * 24, at.y + 18);
+						s.x = pet.x;
+						s.y = pet.y;
+					});
+				}
+				m.chaseD = Math.hypot(px - m.x, py - m.y);
+			}
+		}
+		if (!engage || this.role === "guest") return;
 		this.combat = 2;
 		m.aggro = true;
 	}
@@ -2337,6 +2402,11 @@ export class TurbzGame {
 		if (m.party) dmg *= 0.58;
 		if (m.summoner) dmg *= 0.82;
 		if (m.dungeonBoss) dmg *= .6;
+		dmg *= m.power ?? 1;
+		if (m.bounty) {
+			const w = m.lootGear?.find((g) => g.slot === "weapon");
+			if (w) dmg += equipmentStats(w).damage * 0.28 * (m.power ?? 1);
+		}
 		dmg *= this.threat().dmg;
 		dmg *= 1 - Math.min(.45, this.chan("ward") / 160 + this.buff.ward);
 		if (this.status.some((s) => s.id === "shell")) dmg *= .7;
@@ -2786,7 +2856,7 @@ export class TurbzGame {
 			const slot = this.activeSpirits().indexOf(spirit);
 			const at = this.mates[slot] ?? { x: save.x, y: save.y, swing: 0 };
 			this.playMoveFx(move, m.x, m.y - 16, at.x, at.y - 10);
-			const dmg = Math.max(4, Math.floor(6 + m.level * 1.4 + move.power * 0.08));
+			const dmg = Math.max(4, Math.floor((6 + m.level * 1.4 + move.power * 0.08) * (m.power ?? 1)));
 			spirit.hp -= dmg;
 			this.float(at.x, at.y - 28, `${dmg}`, "#c4473a");
 			if (spirit.hp <= 0) {
@@ -3611,73 +3681,309 @@ export class TurbzGame {
 		this.syncHud(true);
 	}
 	takeBounty() {
-		if (this.rules === "hardcore") return this.toggle("survival");
 		const save = this.save;
-		if (!save || !this.world || save.map !== "world") return;
-		const live = this.mobs.find((m) => m.witch && m.alive);
+		if (!save || !this.world) return this.say("The board is blank out here.");
+		const live = this.liveBounty();
 		if (live) {
 			this.say(`You already hunt ${live.name}.`);
 			publish({ panel: null });
 			return;
 		}
-		const name = WITCH_NAMES[Math.floor(Math.random() * WITCH_NAMES.length)];
-		const race = RACES[Math.floor(Math.random() * RACES.length)];
-		let x = save.x + 400;
-		let y = save.y;
-		for (let i = 0; i < 50; i++) {
-			const tx = 4 + Math.floor(Math.random() * (this.world.w - 8));
-			const ty = 4 + Math.floor(Math.random() * (this.world.h - 8));
-			const wx = tx * 32 + 16;
-			const wy = ty * 32 + 16;
-			if (blocked(this.world, wx, wy)) continue;
-			if (Math.hypot(wx - save.x, wy - save.y) < 420) continue;
-			x = wx;
-			y = wy;
-			break;
-		}
-		const lvl = Math.max(save.level, save.accountLevel);
-		const rng = mulberry32((Date.now() ^ Math.random() * 1e9) >>> 0);
-		const gear = [
-			0,
-			1,
-			2
-		].map(() => rollGear(rng, {
-			level: Math.max(1, save.accountLevel),
-			luck: 18,
-			raceBias: race.id,
-			floor: save.accountLevel > 4 ? "fine" : null
-		}));
-		const spell = huntMove(race.type);
+		const cls = CLASSES[Math.floor(Math.random() * CLASSES.length)];
+		if (!cls) return;
+		const female = classGendered(cls.id) ? Math.random() < 0.5 : true;
+		const raceId = CLASS_RACE[cls.id] ?? "vesper";
+		const bonus = 5 + Math.floor(Math.random() * 46);
+		const level = Math.max(1, save.level + bonus);
+		const spot = this.bountySpot();
+		const rng = mulberry32(((Date.now() ^ (Math.random() * 1e9)) >>> 0) || 7);
+		const gear = (["weapon", "head", "chest", "legs", "feet", "relic"] as Slot[]).map((slot) => this.superiorPiece(slot, level, rng, raceId, cls.type));
+		const offensive = cls.starterMoves.map((id) => MOVE_BY_ID[id]).filter((m) => m && !["heal", "ward", "roll", "dash", "surge"].includes(moveTactic(m)) && m.effect !== "mend" && m.effect !== "shell");
+		const spell = [...offensive].sort((a, b) => b.power - a.power)[0] ?? huntMove(cls.type);
+		const who = WITCH_NAMES[Math.floor(Math.random() * WITCH_NAMES.length)] ?? "Harrow Nia";
+		const name = who;
+		const hpMod = 1 + Math.max(0, (cls.stats.hp ?? 0) / 100) + Math.max(0, (cls.stats.guard ?? 0) / 220);
+		const max = Math.floor((110 + level * 26) * hpMod);
 		const mob = this.makeMob({
-			id: `witch-${nextUid()}`,
+			id: `bounty-${nextUid()}`,
 			species: "muma",
-			x,
-			y,
-			level: lvl + 1,
+			x: spot.x,
+			y: spot.y,
+			level,
+			fixedLevel: true,
 			template: 20,
-			type: race.type,
+			type: cls.type,
 			name
 		});
+		mob.bounty = true;
 		mob.witch = true;
-		mob.race = race.id;
+		mob.classId = cls.id;
+		mob.female = female;
+		mob.race = raceId;
+		mob.map = save.map;
 		mob.name = name;
+		mob.level = level;
 		mob.move = spell.id;
-		mob.hp = mob.max = Math.floor(70 + lvl * 22);
+		mob.baseMax = max;
+		mob.hp = mob.max = max;
+		mob.power = 1;
+		mob.enraged = false;
+		mob.speed = 12 + Math.floor(level * 0.35) + Math.max(0, cls.stats.speed ?? 0) / 10;
 		mob.lootGear = gear;
-		mob.lootBag = {
-			potion: 2,
-			mushroom: 6,
-			leather: 4,
-			ghost_jar: 1
-		};
-		mob.lootKyo = 28 + save.accountLevel * 14;
-		mob.huntIn = 75;
+		mob.lootBag = {};
+		mob.lootKyo = 40 + level * 24 + bonus * 8;
+		mob.huntIn = 300;
 		mob.seen = false;
-		this.mobs.push(mob);
+		mob.aggro = false;
+		mob.homeX = spot.x;
+		mob.homeY = spot.y;
+		const spirits = this.spawnBountySpirits(mob, level, bonus);
+		this.mobs.push(mob, ...spirits);
+		this.contract = [...(this.contract ?? []).filter((m) => m.alive), mob, ...spirits];
 		publish({ panel: null });
-		this.say(`Bounty: ${name}. She already knows your name. Find her.`);
+		const tiles = Math.max(1, Math.round(Math.hypot(spot.x - save.x, spot.y - save.y) / 32));
+		this.say(`Bounty: ${name} the ${cls.name}, level ${level}. ${spirits.length} spirits. ${tiles} tiles ${this.compass(spot.x - save.x, spot.y - save.y)}. Five minutes.`);
+		this.tone(180, 0.14, "triangle");
 		this.persist();
 		this.syncHud(true);
+	}
+	liveBounty() {
+		return (this.contract ?? []).find((m) => m.bounty && m.alive) ?? this.mobs.find((m) => m.bounty && m.alive) ?? null;
+	}
+	stashContract() {
+		const live = this.mobs.filter((m) => (m.bounty || m.bountySpirit) && m.alive);
+		if (!this.contract) this.contract = [];
+		for (const m of live) {
+			const i = this.contract.findIndex((c) => c.id === m.id);
+			if (i >= 0) this.contract[i] = m;
+			else this.contract.push(m);
+		}
+		this.contract = this.contract.filter((m) => m.alive);
+	}
+	restoreContract(map) {
+		this.mobs = this.mobs.filter((m) => !m.bounty && !m.bountySpirit);
+		for (const m of this.contract ?? []) if (m.alive && m.map === map) this.mobs.push(m);
+	}
+	tickContract(dt) {
+		const lead = this.liveBounty();
+		if (!lead || !this.save) return;
+		if (!lead.enraged && lead.huntIn > 0) {
+			lead.huntIn -= dt;
+			if (lead.huntIn <= 0) {
+				lead.huntIn = 0;
+				this.enrageBounty(lead);
+			}
+		} else if (lead.enraged && lead.map !== this.save.map) this.bringBounty(lead);
+	}
+	enrageBounty(lead) {
+		const bump = (m) => {
+			if (!m || m.enraged) return;
+			m.enraged = true;
+			m.power = 2;
+			m.baseMax = m.baseMax ?? m.max;
+			m.max = Math.floor(m.baseMax * 2);
+			m.hp = Math.min(m.max, Math.floor(m.hp * 2));
+			m.speed = Math.floor((m.speed ?? 12) * 1.35);
+			m.seen = true;
+			m.aggro = true;
+			m.huntIn = 0;
+		};
+		bump(lead);
+		for (const s of this.contract ?? []) if (s.bountySpirit && s.master === lead.id && s.alive) bump(s);
+		this.say(`${lead.name} is done waiting. Twice as strong, and hunting you.`);
+		this.tone(90, 0.22, "sawtooth");
+		if (this.save && lead.map !== this.save.map) this.bringBounty(lead);
+		else this.syncHud(true);
+	}
+	bringBounty(lead) {
+		const save = this.save;
+		if (!save || !this.world || !lead?.alive) return;
+		const ang = Math.random() * Math.PI * 2;
+		const dist = (10 + Math.random() * 6) * 32;
+		const spot = nearestOpen(this.world, save.x + Math.cos(ang) * dist, save.y + Math.sin(ang) * dist);
+		lead.x = spot.x;
+		lead.y = spot.y;
+		lead.homeX = spot.x;
+		lead.homeY = spot.y;
+		lead.map = save.map;
+		lead.seen = true;
+		lead.aggro = true;
+		const spirits = (this.contract ?? []).filter((s) => s.bountySpirit && s.master === lead.id && s.alive);
+		spirits.forEach((s, i) => {
+			const at = nearestOpen(this.world, spot.x + (i - 1) * 28, spot.y + 22);
+			s.x = at.x;
+			s.y = at.y;
+			s.homeX = at.x;
+			s.homeY = at.y;
+			s.map = save.map;
+			s.aggro = true;
+		});
+		this.restoreContract(save.map);
+		this.say(`${lead.name} steps out of the dark to hunt you.`);
+		this.syncHud(true);
+	}
+	bountySpot() {
+		const world = this.world;
+		const save = this.save;
+		const reach = reachableFrom(world, save.x, save.y);
+		const min = world.w < 48 ? 6 : 18;
+		const max = world.w < 48 ? 22 : 80;
+		let fallback = null;
+		for (let i = 0; i < 500; i++) {
+			const tx = 3 + Math.floor(Math.random() * (world.w - 6));
+			const ty = 3 + Math.floor(Math.random() * (world.h - 6));
+			if (!reach[ty * world.w + tx]) continue;
+			const x = tx * 32 + 16;
+			const y = ty * 32 + 16;
+			if (blocked(world, x, y)) continue;
+			const tiles = Math.hypot(x - save.x, y - save.y) / 32;
+			if (tiles < min) continue;
+			if (tiles <= max) return { x, y };
+			if (!fallback || tiles < fallback.d) fallback = { x, y, d: tiles };
+		}
+		if (fallback) return { x: fallback.x, y: fallback.y };
+		for (let r = min; r < Math.max(world.w, world.h); r++) {
+			for (let k = 0; k < 16; k++) {
+				const ang = (k / 16) * Math.PI * 2;
+				const tx = Math.floor((save.x + Math.cos(ang) * r * 32) / 32);
+				const ty = Math.floor((save.y + Math.sin(ang) * r * 32) / 32);
+				if (tx < 2 || ty < 2 || tx >= world.w - 2 || ty >= world.h - 2) continue;
+				if (!reach[ty * world.w + tx]) continue;
+				const x = tx * 32 + 16;
+				const y = ty * 32 + 16;
+				if (!blocked(world, x, y)) return { x, y };
+			}
+		}
+		return nearestOpen(world, save.x + 32 * 10, save.y);
+	}
+	superiorPiece(slot, level, rng, raceId, type) {
+		const worn = this.piece(slot);
+		const order = ["worn", "common", "fine", "rare", "epic", "legendary"];
+		let q = worn ? Math.max(0, order.indexOf(worn.quality)) : 2;
+		let gearLevel = Math.max(level, (worn?.level ?? 1) + 2);
+		if (q < 5) q += 1;
+		else gearLevel += 3;
+		const target = worn ? gearScore(worn) : 0;
+		let piece = rollGear(rng, { level: gearLevel, slot, luck: 48, raceBias: raceId, floor: order[Math.min(5, q)], typeBias: type });
+		for (let n = 0; n < 8 && gearScore(piece) <= target; n++) {
+			if (q < 5) q += 1;
+			else gearLevel += 3;
+			piece = rollGear(rng, { level: gearLevel, slot, luck: 48, raceBias: raceId, floor: order[Math.min(5, q)], typeBias: type });
+		}
+		return piece;
+	}
+	spawnBountySpirits(mob, level, bonus) {
+		const save = this.save;
+		const n = bonus >= 35 ? 4 : bonus >= 20 ? 3 : 2;
+		const spirits = [];
+		for (let i = 0; i < n; i++) {
+			const pool = MONSTERS.filter((d) => d.type === "spirit" || d.type === mob.type);
+			const spec = pool[Math.floor(Math.random() * pool.length)] ?? MONSTERS[0];
+			const spiritLevel = Math.max((save?.level ?? 1) + 3, level - (1 + i));
+			const at = nearestOpen(this.world, mob.x + (i - (n - 1) / 2) * 26, mob.y + 18);
+			const pet = this.makeMob({
+				id: `bounty-spirit-${nextUid()}`,
+				species: spec.id,
+				x: at.x,
+				y: at.y,
+				level: spiritLevel,
+				fixedLevel: true,
+				template: spec.template,
+				type: spec.type,
+				name: spec.name
+			});
+			pet.bountySpirit = true;
+			pet.master = mob.id;
+			pet.map = mob.map;
+			pet.level = spiritLevel;
+			pet.rarity = Math.min(4, 2 + Math.floor(bonus / 16));
+			pet.aggro = false;
+			pet.seen = false;
+			pet.power = 1;
+			pet.enraged = false;
+			pet.baseMax = pet.max;
+			pet.homeX = at.x;
+			pet.homeY = at.y;
+			if (pet.look) pet.look.aggression = "hunt";
+			spirits.push(pet);
+		}
+		return spirits;
+	}
+	tickBountySpirit(m, dt) {
+		const save = this.save;
+		if (!save) return;
+		m.moving = false;
+		const lead = this.mobs.find((x) => x.id === m.master && x.alive) ?? (this.contract ?? []).find((x) => x.id === m.master && x.alive);
+		if (!lead) {
+			m.alive = false;
+			m.hp = 0;
+			return;
+		}
+		if (m.status.some((s) => s.id === "sleep")) return;
+		const dx = save.x - m.x;
+		const dy = save.y - m.y;
+		const d = Math.hypot(dx, dy) || 1;
+		const hunting = !!lead.enraged;
+		const engage = hunting || lead.seen || m.hurt > 0;
+		const rooted = m.status.some((s) => s.id === "root");
+		if (!rooted) {
+			if (engage && d > 64) {
+				const sp = hunting ? 176 : 72;
+				this.moveMob(m, dx / d * sp * dt, dy / d * sp * dt);
+			} else if (!engage) {
+				const hx = lead.x - m.x;
+				const hy = lead.y + 16 - m.y;
+				const hd = Math.hypot(hx, hy);
+				if (hd > 34) this.moveMob(m, hx / hd * 78 * dt, hy / hd * 78 * dt);
+			}
+		}
+		m.aggro = engage;
+		if (engage) this.combat = 2;
+	}
+	compass(dx, dy) {
+		const dirs = ["E", "SE", "S", "SW", "W", "NW", "N", "NE"];
+		const i = Math.round((Math.atan2(dy, dx) / (Math.PI / 4) + 8) ) % 8;
+		return dirs[i] ?? "N";
+	}
+	beginUnstuck() {
+		if (!this.save || this.dead || snap.mode !== "play") return;
+		if (this.unstuckT > 0) {
+			this.unstuckT = 0;
+			this.say("Unstuck cancelled.");
+			this.syncHud(true);
+			return;
+		}
+		this.unstuckT = 3;
+		this.say("Unstuck in 3 seconds. Put the cursor where you want to land.");
+		this.syncHud(true);
+	}
+	tickUnstuck(dt) {
+		if (!(this.unstuckT > 0) || !this.save || this.dead) return;
+		const before = Math.ceil(this.unstuckT);
+		this.unstuckT -= dt;
+		if (this.unstuckT <= 0) {
+			this.unstuckT = 0;
+			this.finishUnstuck();
+			this.syncHud(true);
+			return;
+		}
+		if (Math.ceil(this.unstuckT) !== before) this.syncHud(false);
+	}
+	finishUnstuck() {
+		const save = this.save;
+		const w = this.mouseWorld;
+		if (!save || !this.world || !w) return this.say("Move the cursor over the ground first.");
+		const spot = nearestOpen(this.world, w.x, w.y);
+		save.x = spot.x;
+		save.y = spot.y;
+		this.cam.x = spot.x;
+		this.cam.y = spot.y;
+		this.dest = null;
+		this.path = [];
+		this.vx = 0;
+		this.vy = 0;
+		this.say("You tear free and land under the cursor.");
+		this.persist();
 	}
 	spendPerk(id) {
 		const save = this.save;
@@ -3770,6 +4076,8 @@ export class TurbzGame {
 		this.role = "solo";
 		this.save = null;
 		this.mobs = [];
+		this.contract = [];
+		this.unstuckT = 0;
 		publish({
 			...emptySnap(),
 			rules: this.rules,
@@ -3940,13 +4248,14 @@ export class TurbzGame {
 	}
 	openBounty(tavern) {
 		publish({ panel: "bounty" });
-		this.say(`${tavern.name}. The board has a witch's name.`);
+		this.say(`${tavern.name}. The board has a hunter's name.`);
 		this.syncHud(true);
 	}
 	playerArmor() {
 		return ["head", "chest", "legs", "feet", "relic"].reduce((sum, slot) => { const g = this.piece(slot); return sum + (g ? equipmentStats(g).armor : 0); }, 0);
 	}
 	mobArmor(mob) {
+		if (mob.bounty && mob.lootGear?.length) return mob.lootGear.reduce((sum, g) => sum + equipmentStats(g).armor, 0);
 		if (mob.animal && mob.species !== "boar") return 2;
 		if (mob.witch) return 10 + mob.level * 3;
 		return 4 + mob.level * 2 + (mob.boss ? 24 : 0);
@@ -4078,6 +4387,8 @@ export class TurbzGame {
 		this.duel = null;
 		this.save = null;
 		this.mobs = [];
+		this.contract = [];
+		this.unstuckT = 0;
 		this.dead = false;
 		const key = this.rules === "hardcore" ? HC_KEY : SAVE_KEY;
 		const cached = this.rules === "hardcore" ? this.cloudHard : this.cloudCache;
@@ -4683,18 +4994,30 @@ export class TurbzGame {
 				about: def.about
 			})),
 			bounty: (() => {
-				if (this.rules === "hardcore") {
-					return "The frontier: hunt for food, gather water, and rest by a fire.";
-				}
-				const witch = this.mobs.find((m) => m.witch && m.alive);
-				if (!witch) return "";
-				return witch.huntIn > 0 ? `${witch.name} · ${Math.ceil(witch.huntIn)}s before she hunts` : `${witch.name} is hunting you`;
+				const mark = this.liveBounty();
+				if (!mark) return "";
+				const cls = mark.classId ? CLASS_BY_ID[mark.classId]?.name : "";
+				const spirits = (this.contract ?? []).filter((m) => m.bountySpirit && m.master === mark.id && m.alive).length;
+				const left = Math.max(0, Math.ceil(mark.huntIn));
+				const clock = mark.enraged || mark.huntIn <= 0
+					? "hunting you · twice as strong"
+					: `${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")} to find them`;
+				return `${mark.name}${cls ? ` the ${cls}` : ""} · Lv ${mark.level} · ${spirits} spirits · ${clock}`;
 			})(),
 			bountyPlace: (() => {
-				const witch = this.mobs.find((m) => m.witch && m.alive);
-				if (!witch || !this.world) return "";
-				return biomeNameAt(this.world, witch.x, witch.y);
+				const mark = this.liveBounty();
+				if (!mark || !this.save) return "";
+				if (mark.map && mark.map !== this.save.map) return mark.enraged ? "Closing in from another place" : "Still out there. The clock is running.";
+				const tiles = Math.max(1, Math.round(Math.hypot(mark.x - this.save.x, mark.y - this.save.y) / 32));
+				const dir = this.compass(mark.x - this.save.x, mark.y - this.save.y);
+				let where = "";
+				if (this.world && mark.map === this.save.map) {
+					const biome = biomeNameAt(this.world, mark.x, mark.y);
+					where = BIOME_LABEL[biome] ? ` · ${BIOME_LABEL[biome]}` : "";
+				}
+				return `${dir} · ${tiles} tiles${where}`;
 			})(),
+			unstuck: this.unstuckT > 0 ? Math.ceil(this.unstuckT) : 0,
 			unlocked: SETS.filter((s) => this.isUnlocked(s.id)).map((s) => ({
 				id: s.id,
 				name: s.name,
@@ -4798,28 +5121,33 @@ export class TurbzGame {
 			if (!m.alive) continue;
 			if (Math.abs(m.x - this.cam.x) > w / this.zoom * 0.62 + 140) continue;
 			if (Math.abs(m.y - this.cam.y) > h / this.zoom * 0.62 + 160) continue;
-			if (m.witch && m.race) {
-				const rr = RACES.find((r) => r.id === m.race);
+			if ((m.bounty || m.witch) && (m.classId || m.race)) {
+				const cls = m.classId ? CLASS_BY_ID[m.classId] : null;
+				const raceId = m.race ?? (cls ? CLASS_RACE[cls.id] : null) ?? "vesper";
+				const rr = RACES.find((r) => r.id === raceId) ?? RACES[0];
+				const qualities = ["worn", "common", "fine", "rare", "epic", "legendary"];
 				drawActor(ctx, {
 					x: m.x,
 					y: m.y,
-					race: m.race,
+					race: raceId,
+					classId: m.classId,
 					direction: m.direction ?? "down",
-					female: true,
-					hair: rr.hair,
+					moving: !!m.moving,
+					female: m.female !== false,
+					hair: rr?.hair ?? 0,
 					skin: 2,
 					facing: m.facing,
 					walk: m.walk,
-					attack: m.cd > 2 ? .4 : 0,
+					attack: m.swing > 0 ? .4 : 0,
 					hurt: m.hurt,
-					tall: rr.tall,
+					tall: rr?.tall ?? 1,
 					time: this.clock,
-					pieces: m.lootGear.map((g) => ({
+					pieces: (m.lootGear ?? []).map((g) => ({
 						slot: g.slot,
 						style: g.style,
 						type: g.type,
 						fxSeed: g.fxSeed,
-						quality: 3
+						quality: Math.max(0, qualities.indexOf(g.quality))
 					})),
 					setFx: null,
 					setOn: false
@@ -4852,7 +5180,7 @@ export class TurbzGame {
 				ctx.fillRect(m.x - barW / 2, by, barW * pct, 6);
 				drawShadowName(ctx, `${Math.max(0, Math.ceil(m.hp))} ${TYPES[m.type].name}`, m.x, by - 2, "#fff6e8");
 			}
-			if (m.boss || m.witch || near) drawShadowName(ctx, `${m.name} ${m.level}`, m.x, by - 18, m.witch ? "#ff4d6a" : m.boss ? "#c4473a" : TYPES[m.type].color);
+			if (m.boss || m.witch || m.bounty || near) drawShadowName(ctx, m.bounty ? `${m.name} · ${CLASS_BY_ID[m.classId]?.name ?? "Hunter"} ${m.level}` : `${m.name} ${m.level}`, m.x, by - 18, m.bounty ? "#ff4d6a" : m.witch ? "#ff4d6a" : m.boss ? "#c4473a" : TYPES[m.type].color);
 		}
 		if (save.map === "world") for (const tavern of TAVERNS) {
 			const x = tavern.boardTx * 32 + 16;
@@ -5005,6 +5333,13 @@ export class TurbzGame {
 			scale: 1
 		});
 		drawShadowName(ctx, save.name, save.x, save.y - 44, "#fff6e8");
+		if (this.unstuckT > 0 && this.mouseWorld) {
+			const spot = nearestOpen(this.world, this.mouseWorld.x, this.mouseWorld.y);
+			ctx.strokeStyle = "#e6c15a";
+			ctx.lineWidth = 2;
+			ctx.strokeRect(spot.x - 12, spot.y - 12, 24, 24);
+			drawShadowName(ctx, `UNSTUCK ${Math.ceil(this.unstuckT)}`, spot.x, spot.y - 22, "#e6c15a");
+		}
 		if (!this.channel && !this.dead && !this.sleeping) {
 			const node = this.nodeNear(null, 56);
 			const prompt = node ? (node.node === "ore" ? "E  Mine" : node.node === "tree" ? "E  Chop" : "E  Forage") : nearestWaterTile(this.world, save.x, save.y, 64) ? "E  Fish" : "";
@@ -5172,10 +5507,23 @@ export class TurbzGame {
 			ctx.textAlign = "left";
 			ctx.fillText("Inside a rift. The exit is the tear behind you.", 22, 16);
 		}
+		const mark = this.liveBounty();
+		if (mark && (mark.map === "world" || mark.map === save.map)) {
+			const mx = mark.map === "world" ? mark.x / 32 * sx : 18;
+			const my = mark.map === "world" ? mark.y / 32 * sy : 28;
+			ctx.fillStyle = mark.enraged ? "#ff4d6a" : "#e6c15a";
+			ctx.beginPath();
+			ctx.arc(mx, my, 5, 0, Math.PI * 2);
+			ctx.fill();
+			ctx.font = "13px VT323";
+			ctx.fillStyle = "#fff6e8";
+			ctx.textAlign = "left";
+			ctx.fillText(mark.enraged ? "HUNT" : "BOUNTY", mx + 6, my - 2);
+		}
 		ctx.font = "14px VT323, monospace";
 		ctx.fillStyle = "#f0e2c8";
 		ctx.textAlign = "left";
-		ctx.fillText("You · gold arena · violet rift · red boss · green node · orange camp", 8, 352);
+		ctx.fillText("You · gold triangle · gold bounty · violet rift · red boss", 8, 352);
 	}
 	hoverAt(x, y) {
 		const info = this.describeAt(x, y);
@@ -5258,7 +5606,11 @@ export class TurbzGame {
 				lines: [
 					`${TYPES[mob.type].name} · ${Math.ceil(mob.hp)} / ${Math.ceil(mob.max)}`,
 					read.line,
-					best ? `Best you carry: ${best.name} (${moveTactic(best)}, ${kind}).` : "No verse packed yet."
+					best ? `Best you carry: ${best.name} (${moveTactic(best)}, ${kind}).` : "No verse packed yet.",
+					...(mob.bounty ? [
+						mob.enraged ? "The hunt has turned. They are twice as strong." : `${Math.ceil(mob.huntIn)}s before they hunt you.`,
+						`Wears ${mob.lootGear?.length ?? 0} pieces better than yours. Purse ${mob.lootKyo} kyo.`
+					] : [])
 				],
 				actions: []
 			};

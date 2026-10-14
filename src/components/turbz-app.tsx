@@ -439,7 +439,7 @@ function typeClass(t: TypeId): string {
 const PANEL_IDS = ["sheet", "lobby", "bag", "skills", "moves", "quests", "map", "ghost", "craft", "bounty", "survival", "trade", "pause"] as const;
 const PANEL_TITLE: Record<string, string> = {
   sheet: "Character Sheet", lobby: "Multiplayer Lobby", bag: "Bag", skills: "Skills & Perks", moves: "Verses · Attacks & Spells", quests: "Quests",
-  map: "World Map", ghost: "Spirits", craft: "Crafting", bounty: "Witch Hunt", survival: "Survival & Camp", trade: "Trade", pause: "Paused",
+  map: "World Map", ghost: "Spirits", craft: "Crafting", bounty: "Bounty", survival: "Survival & Camp", trade: "Trade", pause: "Paused",
 };
 
 function panelDef(panel: string) {
@@ -475,19 +475,19 @@ function PanelBody({ panel, snap, game }: { panel: string; snap: ReturnType<type
           {panel === "craft" && <Craft snap={snap} game={game} />}
           {panel === "bounty" && (
             <div className="grid gap-2">
-              <p className="font-display text-xs text-blood">WITCH HUNT</p>
-              <p>{snap.bounty || "The board is blank. Take a name and the witch will know."}</p>
-              {snap.bountyPlace && <p className="text-dim">Last seen toward {snap.bountyPlace}.</p>}
-              <p className="text-dim">If you are slow, she comes for you. She drops her bag, her kyo, and every piece she wears.</p>
-              <button className="px-btn px-btn-kyo" onClick={() => game?.takeBounty()}>
-                Take the hunt
+              <p className="font-display text-xs text-blood">BOUNTY BOARD</p>
+              <p>{snap.bounty || "The board is blank. Take a name and a hunter steps onto this map."}</p>
+              {snap.bountyPlace && <p className="text-dim">{snap.bountyPlace}.</p>}
+              <p className="text-dim">They are one of the playable classes, 5 to 50 levels above you, in better gear, with spirits of their own. You have five minutes. After that they double in power and hunt you. Kill them and you take every piece they wear, plus their kyo.</p>
+              <button className="px-btn px-btn-kyo" data-testid="take-bounty-btn" onClick={() => game?.takeBounty()}>
+                {snap.bounty ? "Bounty already out" : "Accept bounty"}
               </button>
             </div>
           )}
           {panel === "pause" && (
             <div className="grid gap-2">
               <p>
-                WASD / arrows: move. E: gather, fish, or talk. X: Crafting. 1–9: cast. B/I: Bag. V: Verses. K: Skills. G: Spirits. C: Character Sheet. L: Lobby. M: Map. H: Hardcore Survival. Escape: close or pause. Right-click or Menu opens more actions. Chat and search fields stop movement while typing.
+                WASD / arrows: move. E: gather, fish, or talk. X: Crafting. 1–9: cast. B/I: Bag. V: Verses. K: Skills. G: Spirits. C: Character Sheet. L: Lobby. M: Map. H: Hardcore Survival. Escape: close or pause. Unstuck moves you to the cursor after 3 seconds. Right-click or Menu opens more actions. Chat and search fields stop movement while typing.
               </p>
               {snap.roomCode && <p className="text-kyo">Lobby {snap.roomCode}</p>}
               <p className="text-dim">Drag any window by its title bar, resize from the corner, and pin it to keep it open and locked. Your layout saves to your TURBZ account.</p>
@@ -503,6 +503,9 @@ function PanelBody({ panel, snap, game }: { panel: string; snap: ReturnType<type
                 ))}
                 {!(game?.customMaps().length) && <p className="text-dim">Build and save maps in Designer Mode, then enter them here.</p>}
               </div>
+              <button className="px-btn" data-testid="unstuck-menu-btn" onClick={() => game?.beginUnstuck()}>
+                {snap.unstuck ? `Unstuck ${snap.unstuck}` : "Unstuck · land on cursor in 3s"}
+              </button>
               <button className="px-btn" data-testid="reset-layout-btn" onClick={() => resetLayout()}>
                 Reset window layout
               </button>
@@ -556,6 +559,8 @@ function Play({
           {snap.log[0] && <p className="vitals-line vitals-log" data-testid="vitals-log">{snap.log[0]}</p>}
           {snap.shrine && <p className="vitals-line text-kyo">{snap.shrine}</p>}
           {snap.roomCode && <p className="vitals-line text-kyo" data-testid="vitals-lobby">Lobby {snap.roomCode} · {snap.lobby.members.length} in party</p>}
+          {snap.bounty && <p className="vitals-line text-blood" data-testid="vitals-bounty">{snap.bounty}</p>}
+          {snap.bountyPlace && <p className="vitals-line text-dim">{snap.bountyPlace}</p>}
           <HudActions snap={snap} game={game} />
           <form
             className="mt-1"
@@ -620,6 +625,14 @@ function Play({
       <FloatWin id="movebar" title="Verses · 1-9 to cast" compact def={() => { const w = Math.min(vw() - 16, snap.bar.length * 92 + 28); return { x: Math.max(8, Math.round((vw() - w) / 2)), y: vh() - (narrow() ? 200 : 118), w }; }}>
         <VerseBar snap={snap} game={game} />
       </FloatWin>
+      <button
+        className={`unstuck-fab px-btn ${snap.unstuck ? "px-btn-kyo" : ""}`}
+        type="button"
+        data-testid="unstuck-btn"
+        onClick={() => game?.beginUnstuck()}
+      >
+        {snap.unstuck ? `Unstuck ${snap.unstuck}` : "Unstuck"}
+      </button>
       <button
         className={`auto-fab px-btn ${snap.autoplay ? "px-btn-kyo" : ""}`}
         type="button"

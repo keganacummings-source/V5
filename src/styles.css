@@ -173,6 +173,15 @@
   white-space: nowrap;
 }
 
+.unstuck-fab {
+  position: absolute;
+  right: 8px;
+  bottom: 112px;
+  z-index: 18;
+  min-width: 112px;
+  white-space: nowrap;
+}
+
 .veil-chat {
   position: absolute;
   top: 8px;
@@ -338,7 +347,8 @@
     z-index: 17;
   }
   .menu-fab,
-  .auto-fab {
+  .auto-fab,
+  .unstuck-fab {
     min-width: 0;
     width: 118px;
     height: 44px;
@@ -351,6 +361,10 @@
   }
   .menu-fab {
     right: 8px;
+  }
+  .unstuck-fab {
+    right: 8px;
+    bottom: 60px;
   }
   .move-row .px-btn {
     min-width: 108px;
