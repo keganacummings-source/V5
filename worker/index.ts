@@ -24,6 +24,7 @@ import { isJoinError } from "./signaling-core.ts";
 
 export { SignalingRoom } from "./room.ts";
 export { UserAccount } from "./account.ts";
+export { GravesBoard } from "./graves.ts";
 
 const COOKIE = "turbz_session";
 const COOKIE_MAX_AGE = 30 * 24 * 60 * 60;
@@ -197,12 +198,68 @@ async function handleSave(request: Request, env: Env, url: URL): Promise<Respons
   }
 }
 
+function gravesStub(env: Env) {
+  return env.GRAVES.get(env.GRAVES.idFromName("global"));
+}
+
+async function handleGraves(request: Request, env: Env, url: URL): Promise<Response> {
+  try {
+    const stub = gravesStub(env);
+
+    if (request.method === "GET") {
+      const modeRaw = url.searchParams.get("mode") ?? "hunt";
+      if (modeRaw !== "hunt" && modeRaw !== "arena" && modeRaw !== "hardcore") {
+        return json({ error: "unknown board" }, 400);
+      }
+      const rows = await stub.list(modeRaw);
+      return json(rows);
+    }
+
+    if (request.method === "POST") {
+      if (crossOrigin(request, url)) return json({ error: "forbidden" }, 403);
+      const me = await currentUser(request, env);
+      if (!me) return json({ error: "sign in required" }, 401);
+      const raw = await readJson(request, 30_000);
+      if (raw instanceof Response) return raw;
+      if (!raw || typeof raw !== "object") return json({ error: "bad grave" }, 400);
+      const body = raw as Record<string, unknown>;
+      const mode = body.mode === "hunt" || body.mode === "arena" || body.mode === "hardcore" ? body.mode : null;
+      if (!mode) return json({ error: "unknown board" }, 400);
+      const name = String(body.name ?? "").slice(0, 24).trim();
+      if (!name) return json({ error: "nameless grave" }, 400);
+      const score = Math.max(0, Math.min(1_000_000_000, Math.floor(Number(body.score) || 0)));
+      const level = Math.max(1, Math.min(99, Math.floor(Number(body.level) || 1)));
+      const race = String(body.race ?? "Unknown").slice(0, 24);
+      const grave = {
+        mode,
+        score,
+        name,
+        race,
+        level,
+        accountScore: Math.max(0, Math.floor(Number(body.accountScore) || 0)),
+        skills: Array.isArray(body.skills) ? body.skills.slice(0, 16) : [],
+        gear: Array.isArray(body.gear) ? body.gear.slice(0, 8) : [],
+        note: String(body.note ?? "").slice(0, 180),
+      };
+      await stub.post(me.displayName || me.id, grave);
+      return json({ ok: true });
+    }
+
+    return json({ error: "method not allowed" }, 405);
+  } catch (error) {
+    console.error("[graves] error:", error);
+    const msg = error instanceof Error ? error.message : "Leaderboard failed";
+    return json({ error: msg }, 500);
+  }
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/api/rtc") return handleRtc(request, env, url);
     if (url.pathname.startsWith("/api/account/")) return handleAccount(request, env, url);
     if (url.pathname === "/api/save") return handleSave(request, env, url);
+    if (url.pathname === "/api/graves") return handleGraves(request, env, url);
     if (url.pathname.startsWith("/api/")) return json({ error: "not found" }, 404);
     // Normally unreachable (assets are served before the worker runs), but keeps
     // `wrangler dev` and any future run_worker_first change working.
