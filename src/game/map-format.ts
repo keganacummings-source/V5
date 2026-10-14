@@ -1,0 +1,183 @@
+import type { Spawn, Tile as WorldTile, WorldData } from "./world";
+import { TILE, WORLD_H, WORLD_W, MONSTER_BY_ID, ANIMAL_BY_ID } from "./content";
+import { findAtlasTile } from "./tile-atlas";
+
+export const MAP_VERSION = 1;
+
+export type Portal = { map: string; tx?: number; ty?: number };
+export type MapTile = WorldTile & {
+  sprite?: string;
+  layers?: string[];
+  portal?: Portal;
+};
+export const MAX_LAYERS = 4;
+export const DESIGNER_KEY = "turbz-designer-maps-v1";
+
+/** Designer maps saved on this device, keyed by id. */
+export function savedMaps(): MapFile[] {
+  try {
+    const list = JSON.parse(localStorage.getItem(DESIGNER_KEY) ?? "[]");
+    return Array.isArray(list) ? list.flatMap((m) => { try { return [parseMapJson(m)]; } catch { return []; } }) : [];
+  } catch {
+    return [];
+  }
+}
+
+export type MapFile = {
+  version: number;
+  id: string;
+  name: string;
+  w: number;
+  h: number;
+  tileSize: number;
+  tiles: MapTile[];
+  spawns?: Spawn[];
+  spawn?: { tx: number; ty: number };
+  notes?: string;
+  kind?: "bossroom" | "dungeon" | "world";
+};
+
+export const FLOOR_COLOR: Record<number, string> = {
+  0: "#3d5a3a",
+  1: "#2a2220",
+  2: "#2a5a7a",
+  3: "#6a5a48",
+  4: "#8a7048",
+  5: "#c8d8e8",
+  6: "#5a4038",
+  7: "#2a1840",
+  8: "#b8a890",
+  9: "#6a6870",
+  10: "#c8b070",
+  11: "#c04018",
+};
+
+export function emptyMap(id: string, name: string, w: number, h: number, floor = 0, biome = 3): MapFile {
+  const tiles: MapTile[] = Array.from({ length: w * h }, () => ({
+    floor,
+    biome,
+    block: 0,
+    decor: 0,
+  }));
+  for (let x = 0; x < w; x++) {
+    for (const y of [0, h - 1]) {
+      const t = tiles[y * w + x]!;
+      t.block = 1;
+      t.floor = 1;
+    }
+  }
+  for (let y = 0; y < h; y++) {
+    for (const x of [0, w - 1]) {
+      const t = tiles[y * w + x]!;
+      t.block = 1;
+      t.floor = 1;
+    }
+  }
+  return {
+    version: MAP_VERSION,
+    id,
+    name,
+    w,
+    h,
+    tileSize: TILE,
+    tiles,
+    spawns: [],
+    spawn: { tx: Math.floor(w / 2), ty: Math.floor(h / 2) },
+  };
+}
+
+export function mapToWorld(map: MapFile): WorldData {
+  return {
+    w: map.w,
+    h: map.h,
+    tiles: map.tiles.map((t) => ({
+      floor: t.floor,
+      biome: t.biome,
+      block: t.block,
+      decor: t.decor,
+      sprite: t.sprite,
+      layers: t.layers,
+      portal: t.portal,
+    })) as WorldTile[],
+    spawns: map.spawns ? map.spawns.map((s) => ({ ...s })) : [],
+    cache: null,
+  };
+}
+
+export function tileSlow(world: WorldData, x: number, y: number): number {
+  const tx = Math.floor(x / TILE);
+  const ty = Math.floor(y / TILE);
+  if (tx < 0 || ty < 0 || tx >= world.w || ty >= world.h) return 1;
+  const t = world.tiles[ty * world.w + tx] as MapTile | undefined;
+  if (!t) return 1;
+  if (t.sprite) {
+    const a = findAtlasTile(t.sprite);
+    if (a) return a.slow;
+  }
+  if (t.floor === 2) return 0.45;
+  if (t.floor === 5) return 0.85;
+  if (t.floor === 6) return 0.9;
+  if (t.floor === 10) return 0.8;
+  if (t.floor === 3) return 1.1;
+  return 1;
+}
+
+export function parseMapJson(raw: unknown): MapFile {
+  if (!raw || typeof raw !== "object") throw new Error("Map file is empty or invalid.");
+  const m = raw as Partial<MapFile>;
+  if (typeof m.id !== "string" || !/^[a-z0-9_-]{1,80}$/i.test(m.id) || typeof m.name !== "string" || !m.name.trim()) throw new Error("Map needs a name and a file ID using letters, numbers, dashes or underscores.");
+  if (m.version !== MAP_VERSION) throw new Error("Unsupported map version.");
+  if (!Number.isInteger(m.w) || !Number.isInteger(m.h) || m.w! < 4 || m.h! < 4 || m.w! > 512 || m.h! > 512) throw new Error("Map dimensions must be whole numbers from 4 to 512.");
+  if (m.tileSize !== TILE) throw new Error(`Tile size must be ${TILE}.`);
+  if (!Array.isArray(m.tiles) || m.tiles.length !== m.w! * m.h!) throw new Error("Tile count must match the map dimensions.");
+  const tiles = m.tiles.map((t) => {
+    if (!t || !Number.isInteger(t.floor) || t.floor < 0 || t.floor > 11 || !Number.isInteger(t.biome) || t.biome < 0 || t.biome > 6 || ![0, 1].includes(t.block) || !Number.isInteger(t.decor) || t.decor < 0 || t.decor > 100) throw new Error("Invalid map tile.");
+    if (t.sprite && (typeof t.sprite !== "string" || !/^\/MapAssets\/[A-Za-z0-9_/-]+\.png$/.test(t.sprite) || t.sprite.includes(".."))) throw new Error("Tile sprite must come from MapAssets.");
+    const asset = (v: unknown) => typeof v === "string" && /^\/MapAssets\/[A-Za-z0-9_/-]+\.png$/.test(v) && !v.includes("..");
+    if (t.layers !== undefined && (!Array.isArray(t.layers) || t.layers.length > MAX_LAYERS || !t.layers.every(asset))) throw new Error("Tile layers must be up to 4 MapAssets sprites.");
+    if (t.portal !== undefined && (!t.portal || typeof t.portal.map !== "string" || !/^[a-z0-9_-]{1,80}$/i.test(t.portal.map) || (t.portal.tx !== undefined && !Number.isInteger(t.portal.tx)) || (t.portal.ty !== undefined && !Number.isInteger(t.portal.ty)))) throw new Error("Invalid portal.");
+    return {
+      floor: t.floor, biome: t.biome, block: t.block, decor: t.decor,
+      ...(t.sprite ? { sprite: t.sprite } : {}),
+      ...(t.layers?.length ? { layers: [...t.layers] } : {}),
+      ...(t.portal ? { portal: { map: t.portal.map, ...(t.portal.tx !== undefined ? { tx: t.portal.tx, ty: t.portal.ty } : {}) } } : {}),
+    };
+  });
+  const spawn = m.spawn ?? { tx: 1, ty: 1 };
+  if (!Number.isInteger(spawn.tx) || !Number.isInteger(spawn.ty) || spawn.tx < 0 || spawn.ty < 0 || spawn.tx >= m.w! || spawn.ty >= m.h! || tiles[spawn.ty * m.w! + spawn.tx]!.block) throw new Error("Player start must be on a walkable tile inside the map.");
+  if (m.spawns !== undefined && (!Array.isArray(m.spawns) || m.spawns.length > 2000)) throw new Error("Invalid spawn list (maximum 2000).");
+  const ids = new Set<string>();
+  const spawns = (m.spawns ?? []).map(s => {
+    if (!s || typeof s.id !== "string" || !s.id || ids.has(s.id) || !["mob", "node"].includes(s.kind) || !Number.isFinite(s.x) || !Number.isFinite(s.y) || s.x < 0 || s.y < 0 || s.x >= m.w! * TILE || s.y >= m.h! * TILE || !Number.isInteger(s.level) || s.level < 1 || s.level > 100 || tiles[Math.floor(s.y / TILE) * m.w! + Math.floor(s.x / TILE)]!.block) throw new Error("Invalid or blocked entity spawn.");
+    if (s.kind === "mob" && (!s.species || !(MONSTER_BY_ID[s.species] || ANIMAL_BY_ID[s.species]))) throw new Error("Unknown enemy species.");
+    if (s.kind === "node" && !["ore", "tree", "shroom", "fish"].includes(s.node ?? "")) throw new Error("Unknown resource node.");
+    if (s.boss !== undefined && typeof s.boss !== "boolean") throw new Error("Invalid boss flag.");
+    ids.add(s.id);
+    return { ...s };
+  });
+  return { version: MAP_VERSION, id: typeof m.id === "string" ? m.id.slice(0, 80) : "custom", name: typeof m.name === "string" ? m.name.slice(0, 100) : "Custom Map", w: m.w!, h: m.h!, tileSize: TILE, tiles, spawns, spawn, notes: typeof m.notes === "string" ? m.notes.slice(0, 2000) : undefined, kind: ["bossroom", "dungeon", "world"].includes(m.kind ?? "") ? m.kind : "world" };
+}
+
+export function downloadMapFile(map: MapFile): void {
+  const blob = new Blob([JSON.stringify(map, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `${map.id || "map"}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+export async function fetchMapFile(id: string): Promise<MapFile | null> {
+  try {
+    const res = await fetch(`/Maps/${id}.json`, { cache: "no-cache" });
+    if (!res.ok) return null;
+    return parseMapJson(await res.json());
+  } catch {
+    return null;
+  }
+}
+
+export { TILE, WORLD_W, WORLD_H };

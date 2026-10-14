@@ -1,0 +1,7 @@
+{
+  "name": "turbz-preview-runner",
+  "private": true,
+  "scripts": {
+    "start": "cd /app && PATH=/app/node_modules/.bin:$PATH BETTER_AUTH_URL=${APP_PUBLIC_URL:-https://class-sprite-hub.preview.emergentagent.com} node scripts/with-app-env.mjs vite dev --host 0.0.0.0 --port 3000"
+  }
+}

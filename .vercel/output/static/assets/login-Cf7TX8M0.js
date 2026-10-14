@@ -1,0 +1,1 @@
+import{n as e}from"./index-CT-7EVly.js";import{t}from"./turbz-app-Dm2AkHTR.js";var n=e();function r(){return(0,n.jsx)(t,{})}export{r as component};

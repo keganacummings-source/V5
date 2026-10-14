@@ -1,0 +1,18 @@
+name = "turbz3"
+compatibility_date = "2025-10-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Serve the static build as Cloudflare Workers Static Assets.
+# Custom domain (dreamdaw.com) is attached in the Cloudflare dashboard
+# after the first deploy, or via `wrangler domains` / routes below.
+assets = { directory = "./dist-static" }
+
+# Uncomment and adjust if you want the worker to claim the root domain.
+# You must already have dreamdaw.com on this Cloudflare account.
+# routes = [
+#   { pattern = "dreamdaw.com/*", zone_name = "dreamdaw.com" },
+#   { pattern = "www.dreamdaw.com/*", zone_name = "dreamdaw.com" }
+# ]
+
+# Optional account_id if you use multiple accounts (prefer env var or wrangler login).
+# account_id = "YOUR_ACCOUNT_ID"
