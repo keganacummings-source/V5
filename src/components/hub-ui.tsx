@@ -1,11 +1,157 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { UserButton } from "@/lib/auth/gates";
 import { staticSignOut, useStaticAccount } from "@/lib/auth/static-account";
 import { answerFriend, ensureProfile, listChat, listFriends, listGraves, postChat, requestFriend } from "@/game/social-client";
 import type { ChatLine, FriendRow, GraveMode, GraveRow } from "@/game/social-types";
+import type { TypeId } from "@/game/content";
+import type { RaceId } from "@/game/content";
+import { initActorSprites, tryDrawActorSprite } from "@/game/actor-sprites";
+import type { ActorDraw } from "@/game/sprites";
 
 /** Static (dreamdaw.com) build: accounts + saves live in the worker. */
 const LOCAL = import.meta.env.VITE_STATIC_HUNT === "1";
+
+const Q_NUM: Record<string, number> = {
+  worn: 1,
+  common: 2,
+  fine: 3,
+  rare: 4,
+  epic: 5,
+  legendary: 6,
+};
+
+const RACES: RaceId[] = ["vesper", "cinder", "tide", "thorn", "rime"];
+const TYPES: TypeId[] = [
+  "normal",
+  "fire",
+  "water",
+  "earth",
+  "air",
+  "electric",
+  "ice",
+  "void",
+  "light",
+  "spirit",
+  "ghoul",
+];
+
+function raceId(raw: string): RaceId {
+  const k = raw.toLowerCase();
+  return (RACES.find((r) => r === k || k.includes(r)) ?? "vesper") as RaceId;
+}
+
+function typeId(raw: string): TypeId {
+  const k = raw.toLowerCase();
+  return (TYPES.find((t) => t === k || k.includes(t)) ?? "normal") as TypeId;
+}
+
+function seedFrom(s: string): number {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+  return Math.abs(h) || 1;
+}
+
+/** Canvas portrait of a fallen witch — body + animated gear FX (not a real GIF file). */
+function GravePortrait({ row }: { row: GraveRow }) {
+  const ref = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    let stop = false;
+    let raf = 0;
+    const canvas = ref.current;
+    if (!canvas) return;
+
+    const W = 120;
+    const H = 140;
+    canvas.width = W;
+    canvas.height = H;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    const pieces: ActorDraw["pieces"] = row.gear.map((g, i) => ({
+      slot: g.slot,
+      style: (seedFrom(g.name + g.slot) % 6) + 1,
+      type: typeId(g.type),
+      fxSeed: seedFrom(g.name + String(i) + row.id),
+      quality: Q_NUM[g.quality.toLowerCase()] ?? Math.max(1, Math.min(6, parseInt(g.quality, 10) || 2)),
+    }));
+
+    const actor: ActorDraw = {
+      x: W / 2,
+      y: H - 18,
+      race: raceId(row.race),
+      female: seedFrom(row.name) % 2 === 0,
+      hair: seedFrom(row.username) % 5,
+      skin: seedFrom(row.name + row.race) % 5,
+      facing: 1,
+      direction: "down",
+      moving: true,
+      walk: 0,
+      attack: 0,
+      hurt: 0,
+      pieces,
+      setFx: null,
+      setOn: false,
+      scale: 3.2,
+      classId: undefined,
+      time: 0,
+    };
+
+    const t0 = performance.now();
+
+    void initActorSprites()
+      .catch(() => {})
+      .finally(() => {
+        const tick = (now: number) => {
+          if (stop) return;
+          const t = (now - t0) / 1000;
+          actor.walk = (t * 2.2) % 4;
+          actor.time = t;
+          actor.moving = true;
+
+          ctx.fillStyle = "#0c0a10";
+          ctx.fillRect(0, 0, W, H);
+          // soft ground plate
+          ctx.fillStyle = "#1a1520";
+          ctx.fillRect(W * 0.15, H - 22, W * 0.7, 10);
+
+          const drew = tryDrawActorSprite(ctx, actor);
+          if (!drew) {
+            // procedural fallback silhouette while sheets load
+            ctx.fillStyle = "#6a5a70";
+            ctx.fillRect(W / 2 - 10, H - 70, 20, 48);
+            ctx.fillStyle = "#c4a890";
+            ctx.fillRect(W / 2 - 8, H - 86, 16, 16);
+          }
+
+          // score ribbon
+          ctx.fillStyle = "#e8a020";
+          ctx.font = "10px monospace";
+          ctx.textAlign = "center";
+          ctx.fillText(`score ${row.score}`, W / 2, 14);
+
+          raf = requestAnimationFrame(tick);
+        };
+        raf = requestAnimationFrame(tick);
+      });
+
+    return () => {
+      stop = true;
+      cancelAnimationFrame(raf);
+    };
+  }, [row]);
+
+  return (
+    <canvas
+      ref={ref}
+      width={120}
+      height={140}
+      className="grave-portrait border-2 border-bone bg-ink"
+      style={{ imageRendering: "pixelated", width: 120, height: 140 }}
+      aria-label={`${row.name} fallen portrait`}
+    />
+  );
+}
 
 export function ChatDock({ username, playing, bare }: { username: string; playing: boolean; bare?: boolean }) {
   const [open, setOpen] = useState(false);
@@ -215,7 +361,7 @@ export function Boards({ onBack }: { onBack: () => void }) {
       <div className="px-panel my-auto w-full max-w-3xl p-4">
         <p className="font-display text-xs text-blood">GRAVE LEDGER</p>
         <h2 className="font-display mt-2 text-sm text-bone">Only the dead are counted</h2>
-        <p className="mt-2 text-dim">A global score of fallen witches. Open a name to see the kit, the enchants, and the account that wore them.</p>
+        <p className="mt-2 text-dim">A global score of fallen witches. Open a name to see the body, kit FX, enchants, and the account that wore them.</p>
         <div className="mt-3 grid grid-cols-2 gap-1">
           {BOARDS.map((b) => (
             <button key={b.id} className={`px-btn ${mode === b.id ? "px-btn-kyo" : ""}`} type="button" onClick={() => setMode(b.id)}>
@@ -241,13 +387,18 @@ export function Boards({ onBack }: { onBack: () => void }) {
           </div>
           {pick && (
             <div className="border-2 border-bone p-3">
-              <p className="font-display text-xs text-kyo">{pick.name}</p>
-              <p>
-                {pick.race} · level {pick.level} · score {pick.score}
-              </p>
-              <p className="text-dim">Account {pick.username}</p>
-              <p className="text-dim">Keeper score {pick.accountScore}</p>
-              <p className="mt-2">{pick.note}</p>
+              <div className="flex flex-wrap items-start gap-3">
+                <GravePortrait row={pick} />
+                <div className="min-w-0 flex-1">
+                  <p className="font-display text-xs text-kyo">{pick.name}</p>
+                  <p>
+                    {pick.race} · level {pick.level} · score {pick.score}
+                  </p>
+                  <p className="text-dim">Account {pick.username}</p>
+                  <p className="text-dim">Keeper score {pick.accountScore}</p>
+                  <p className="mt-2">{pick.note}</p>
+                </div>
+              </div>
               <p className="mt-3 font-display text-xs">Skills</p>
               {pick.skills.length === 0 && <p className="text-dim">No skill record.</p>}
               {pick.skills.map((sk) => (
