@@ -1,22 +1,39 @@
 #!/usr/bin/env node
 /**
- * Reconstructs src/components/turbz-app.tsx from committed part files.
- * Runs as predev / prebuild so local + CI always get the full source.
+ * Reconstructs src/components/turbz-app.tsx from:
+ * 1) turbz-app.tsx.partN text parts, OR
+ * 2) turbz.b64.partN gzip+base64 chunks
  */
 import { readFileSync, writeFileSync, readdirSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
+import { gunzipSync } from "zlib";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const dir = join(root, "src/components");
 const out = join(dir, "turbz-app.tsx");
-const parts = readdirSync(dir)
-  .filter((f) => /^turbz-app\.tsx\.part\d+$/.test(f))
-  .sort((a, b) => Number(a.replace(/\D/g, "")) - Number(b.replace(/\D/g, "")));
-if (!parts.length) {
+
+function fromTextParts() {
+  const parts = readdirSync(dir)
+    .filter((f) => /^turbz-app\.tsx\.part\d+$/.test(f))
+    .sort((a, b) => Number(a.replace(/\D/g, "")) - Number(b.replace(/\D/g, "")));
+  if (!parts.length) return null;
+  return parts.map((f) => readFileSync(join(dir, f), "utf8")).join("");
+}
+
+function fromB64Parts() {
+  const parts = readdirSync(dir)
+    .filter((f) => /^turbz\.b64\.part\d+$/.test(f))
+    .sort((a, b) => Number(a.replace(/\D/g, "")) - Number(b.replace(/\D/g, "")));
+  if (!parts.length) return null;
+  const b64 = parts.map((f) => readFileSync(join(dir, f), "utf8")).join("").replace(/\s/g, "");
+  return gunzipSync(Buffer.from(b64, "base64")).toString("utf8");
+}
+
+const body = fromTextParts() || fromB64Parts();
+if (!body) {
   console.warn("[assemble-turbz] no part files found, skipping");
   process.exit(0);
 }
-const body = parts.map((f) => readFileSync(join(dir, f), "utf8")).join("");
 writeFileSync(out, body);
-console.log(`[assemble-turbz] wrote ${out} (${body.length} bytes from ${parts.length} parts)`);
+console.log(`[assemble-turbz] wrote ${out} (${body.length} bytes)`);
