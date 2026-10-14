@@ -3,7 +3,7 @@ import { authClient } from "@/lib/auth/client";
 import { UserButton } from "@/lib/auth/gates";
 import { useCurrentUserState } from "@/lib/auth/use-current-user";
 import { staticSignIn, staticSignUp, useStaticAccount } from "@/lib/auth/static-account";
-import { ALCHEMY_RECIPES, CLASS_RACE, ITEM_BY_ID, RACES, equipmentStats, type TypeId } from "@/game/content";
+import { ALCHEMY_RECIPES, CLASS_RACE, ENCHANT_BY_ID, ITEM_BY_ID, RACES, enchantText, equipmentStats, type TypeId } from "@/game/content";
 import { CLASSES, classGendered } from "@/game/classes";
 import { CharacterSheet, ClassPicker, LobbyPanel, type Pick } from "@/components/character-ui";
 import { FloatWin, narrow, vh, vw } from "@/components/float-win";
@@ -817,7 +817,7 @@ function Bag({ snap, game }: { snap: ReturnType<typeof getSnap>; game: TurbzGame
               {row.name} {row.power}
             </li>
           ))}
-          {snap.totals.length === 0 && <li className="text-dim">Equipment provides fixed damage and armor.</li>}
+          {snap.totals.length === 0 && <li className="text-dim">No enchantments on what you are wearing.</li>}
         </ul>
         {category !== "gear" && <div className="mt-3 grid gap-1">
           <p className="text-kyo">Items · {items.length} stacks</p>
@@ -853,9 +853,17 @@ function Bag({ snap, game }: { snap: ReturnType<typeof getSnap>; game: TurbzGame
           >
             {piece.name}
             <span className="mt-1 block text-dim">
-              {piece.slot} · {piece.quality} · {equipmentStats(piece).damage ? `Damage ${equipmentStats(piece).damage}` : `Armor ${equipmentStats(piece).armor}`}
-              {snap.equipped.includes(piece.uid) ? " · worn" : ""}
+              {`Lv ${piece.level} · ${piece.slot} · ${piece.quality} · ${equipmentStats(piece).damage ? `Damage ${equipmentStats(piece).damage}` : `Armor ${equipmentStats(piece).armor}`} · ${(piece.enchants ?? []).length} enchant${(piece.enchants ?? []).length === 1 ? "" : "s"}${snap.equipped.includes(piece.uid) ? " · worn" : ""}`}
             </span>
+            {snap.selected === piece.uid && (piece.enchants ?? []).length > 0 && (
+              <span className="mt-1 block text-dim">
+                {(piece.enchants ?? []).map((e) => (
+                  <span key={`${piece.uid}-${e.id}`} className="mt-1 block">
+                    {ENCHANT_BY_ID[e.id]?.name ?? e.id} {e.power} · {enchantText(e)}
+                  </span>
+                ))}
+              </span>
+            )}
           </button>
         ))}
         {snap.selected && (
@@ -865,6 +873,9 @@ function Bag({ snap, game }: { snap: ReturnType<typeof getSnap>; game: TurbzGame
             </button>
             <button className="px-btn" disabled={snap.equipped.includes(snap.selected)} onClick={() => game?.sell(snap.selected!)}>
               {snap.equipped.includes(snap.selected) ? "Worn · Equip a replacement to sell" : "Sell"}
+            </button>
+            <button className="px-btn col-span-2" onClick={() => game?.disenchant()}>
+              Strip an enchant · 80 kyo
             </button>
 
           </div>
@@ -886,7 +897,7 @@ function Bag({ snap, game }: { snap: ReturnType<typeof getSnap>; game: TurbzGame
 function Skills({ snap, game }: { snap: ReturnType<typeof getSnap>; game: TurbzGame | null }) {
   return (
     <div className="grid gap-3">
-      <p className="text-kyo">{snap.skillPoints} character skill points. Spend them in Attacks & Spells.</p>
+      <p className="text-kyo">{snap.skillPoints} character skill points. Spend them in Attacks & Spells. Character level caps at 400.</p>
       <p>
         Account {snap.accountLevel} · {snap.accountXp}/{snap.accountNeed} · {snap.perkPoints} perk points
       </p>
@@ -894,20 +905,21 @@ function Skills({ snap, game }: { snap: ReturnType<typeof getSnap>; game: TurbzG
       <div className="bar-track">
         <div className="h-full bg-kyo" style={{ width: `${Math.min(100, (snap.accountXp / Math.max(1, snap.accountNeed)) * 100)}%` }} />
       </div>
-      <p className="text-dim">Each account level gives 5 points. They are permanent enchantments on every witch you become.</p>
+      <p className="text-dim">Permanent account bonuses stay on every witch. Death, a new body, and Hardcore all keep them. Each line is the exact effect of what you have bought.</p>
       <div className="grid gap-1">
         {snap.perks.map((perk) => (
-          <button key={perk.id} className="px-btn text-left" disabled={snap.perkPoints < 1} onClick={() => game?.spendPerk(perk.id)}>
-            {perk.name} {perk.power}
+          <button key={perk.id} className="px-btn text-left" disabled={snap.perkPoints < 1 || perk.power >= perk.max} onClick={() => game?.spendPerk(perk.id)}>
+            {perk.name} {perk.power}/{perk.max}
             <span className="mt-1 block text-dim">{perk.about}</span>
           </button>
         ))}
       </div>
+      <p className="text-dim">Skills cap at 400 and stay on the account. A death does not reset them, so you can keep grinding.</p>
       <div className="grid gap-1">
         {snap.skills.map((sk) => (
           <p key={sk.id}>
             <span className="text-kyo">
-              {sk.name} {sk.level}
+              {sk.name} {sk.level}/400
             </span>
             <span className="text-dim">
               {" "}

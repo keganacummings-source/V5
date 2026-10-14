@@ -2,12 +2,14 @@
 
 const ARENA_KEY = "turbz-arena-v1";
 const HARD_KEY = "turbz-hardcore-v1";
+const META_KEY = "turbz-account-meta-v1";
 
-type Bundle = { kind: "turbz-bundle"; v: 2; hunt: unknown; arena: unknown; hardcore: unknown };
+type Bundle = { kind: "turbz-bundle"; v: 3; hunt: unknown; arena: unknown; hardcore: unknown; meta: unknown };
 
 let hunt: unknown = null;
 let arena: unknown = null;
 let hardcore: unknown = null;
+let meta: unknown = null;
 let ready = false;
 let writer: ((json: string) => void) | null = null;
 
@@ -47,6 +49,28 @@ export function noteArena(save: unknown | null): void {
   flush();
 }
 
+/** Skills, account level, and permanent bonuses. Shared by Hunt and Hardcore, and kept across death. */
+export function readAccountMeta(): Record<string, unknown> | null {
+  if (meta && typeof meta === "object") return meta as Record<string, unknown>;
+  try {
+    const text = localStorage.getItem(META_KEY);
+    meta = text ? (JSON.parse(text) as unknown) : null;
+  } catch {
+    meta = null;
+  }
+  return meta && typeof meta === "object" ? (meta as Record<string, unknown>) : null;
+}
+
+export function writeAccountMeta(value: Record<string, unknown>): void {
+  meta = value;
+  try {
+    localStorage.setItem(META_KEY, JSON.stringify(value));
+  } catch {
+    /* private mode */
+  }
+  flush();
+}
+
 export function readArenaLocal(): unknown {
   try {
     const text = localStorage.getItem(ARENA_KEY);
@@ -65,17 +89,19 @@ export function readHardLocal(): unknown {
   }
 }
 
-/** Old accounts stored a bare hunt save. A bundle keeps every mode. */
+/** Old accounts stored a bare hunt save. A bundle keeps every mode, plus the shared skill record. */
 export function ingestCloud(raw: unknown): { hunt: unknown; arena: unknown; hardcore: unknown } {
   if (raw && typeof raw === "object" && (raw as { kind?: string }).kind === "turbz-bundle") {
     const bundle = raw as Bundle & { v?: number };
     hunt = bundle.hunt ?? null;
     arena = bundle.arena ?? null;
     hardcore = bundle.hardcore ?? readHardLocal();
+    if (bundle.meta && typeof bundle.meta === "object") meta = bundle.meta;
     try {
       if (arena) localStorage.setItem(ARENA_KEY, JSON.stringify(arena));
       else localStorage.removeItem(ARENA_KEY);
       if (hardcore) localStorage.setItem(HARD_KEY, JSON.stringify(hardcore));
+      if (meta && typeof meta === "object") localStorage.setItem(META_KEY, JSON.stringify(meta));
     } catch {
       /* ignore */
     }
@@ -89,6 +115,13 @@ export function ingestCloud(raw: unknown): { hunt: unknown; arena: unknown; hard
 
 function flush(): void {
   if (!ready || !writer) return;
-  const json = JSON.stringify({ kind: "turbz-bundle", v: 2, hunt: hunt ?? null, arena: arena ?? null, hardcore: hardcore ?? null } satisfies Bundle);
+  const json = JSON.stringify({
+    kind: "turbz-bundle",
+    v: 3,
+    hunt: hunt ?? null,
+    arena: arena ?? null,
+    hardcore: hardcore ?? null,
+    meta: meta ?? readAccountMeta(),
+  } satisfies Bundle);
   writer(json);
 }

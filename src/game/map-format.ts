@@ -163,7 +163,7 @@ export function parseMapJson(raw: unknown): MapFile {
   if (m.spawns !== undefined && (!Array.isArray(m.spawns) || m.spawns.length > 2000)) throw new Error("Invalid spawn list (maximum 2000).");
   const ids = new Set<string>();
   const spawns = (m.spawns ?? []).map(s => {
-    if (!s || typeof s.id !== "string" || !s.id || ids.has(s.id) || !["mob", "node"].includes(s.kind) || !Number.isFinite(s.x) || !Number.isFinite(s.y) || s.x < 0 || s.y < 0 || s.x >= m.w! * TILE || s.y >= m.h! * TILE || !Number.isInteger(s.level) || s.level < 1 || s.level > 100 || tiles[Math.floor(s.y / TILE) * m.w! + Math.floor(s.x / TILE)]!.block) throw new Error("Invalid or blocked entity spawn.");
+    if (!s || typeof s.id !== "string" || !s.id || ids.has(s.id) || !["mob", "node"].includes(s.kind) || !Number.isFinite(s.x) || !Number.isFinite(s.y) || s.x < 0 || s.y < 0 || s.x >= m.w! * TILE || s.y >= m.h! * TILE || !Number.isInteger(s.level) || s.level < 1 || s.level > 1000 || tiles[Math.floor(s.y / TILE) * m.w! + Math.floor(s.x / TILE)]!.block) throw new Error("Invalid or blocked entity spawn.");
     if (s.kind === "mob" && (!s.species || !(MONSTER_BY_ID[s.species] || ANIMAL_BY_ID[s.species]))) throw new Error("Unknown enemy species.");
     if (s.kind === "node" && !["ore", "tree", "shroom", "fish"].includes(s.node ?? "")) throw new Error("Unknown resource node.");
     if (s.boss !== undefined && typeof s.boss !== "boolean") throw new Error("Invalid boss flag.");
@@ -184,7 +184,7 @@ function parseZones(raw: unknown, w: number, h: number): SpawnZone[] {
     if (typeof q.id !== "string" || !q.id || ids.has(q.id)) throw new Error("Spawn zones need unique ids.");
     ids.add(q.id);
     if (!num(q.tx, 0, w - 1) || !num(q.ty, 0, h - 1) || !num(q.tw, 1, w) || !num(q.th, 1, h) || q.tx + q.tw > w || q.ty + q.th > h) throw new Error("Spawn zone is outside the map.");
-    if (!num(q.levelMin, 1, 100) || !num(q.levelMax, 1, 100) || q.levelMin > q.levelMax) throw new Error("Spawn zone levels must be from 1 to 100.");
+    if (!num(q.levelMin, 1, 1000) || !num(q.levelMax, 1, 1000) || q.levelMin > q.levelMax) throw new Error("Spawn zone levels must be from 1 to 1000.");
     if (!num(q.count, 1, 40) || !num(q.respawn, 5, 600)) throw new Error("Spawn zone count must be 1–40 and respawn 5–600 seconds.");
     if (!Array.isArray(q.species) || q.species.length > 40 || !q.species.every((id) => typeof id === "string" && !!(MONSTER_BY_ID[id] || ANIMAL_BY_ID[id]))) throw new Error("Spawn zone has an unknown enemy type.");
     return { id: q.id, tx: q.tx, ty: q.ty, tw: q.tw, th: q.th, levelMin: q.levelMin, levelMax: q.levelMax, species: [...q.species], count: q.count, respawn: q.respawn };

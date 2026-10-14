@@ -219,7 +219,7 @@ async function handleGraves(request: Request, env: Env, url: URL): Promise<Respo
       if (crossOrigin(request, url)) return json({ error: "forbidden" }, 403);
       const me = await currentUser(request, env);
       if (!me) return json({ error: "sign in required" }, 401);
-      const raw = await readJson(request, 30_000);
+      const raw = await readJson(request, 60_000);
       if (raw instanceof Response) return raw;
       if (!raw || typeof raw !== "object") return json({ error: "bad grave" }, 400);
       const body = raw as Record<string, unknown>;
@@ -228,7 +228,7 @@ async function handleGraves(request: Request, env: Env, url: URL): Promise<Respo
       const name = String(body.name ?? "").slice(0, 24).trim();
       if (!name) return json({ error: "nameless grave" }, 400);
       const score = Math.max(0, Math.min(1_000_000_000, Math.floor(Number(body.score) || 0)));
-      const level = Math.max(1, Math.min(99, Math.floor(Number(body.level) || 1)));
+      const level = Math.max(1, Math.min(400, Math.floor(Number(body.level) || 1)));
       const race = String(body.race ?? "Unknown").slice(0, 24);
       const grave = {
         mode,

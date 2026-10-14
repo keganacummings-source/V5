@@ -770,7 +770,7 @@ function ZoneEditor({
               <input className="px-input" aria-label="Zone level min" type="number" min={1} max={zone.levelMax} value={zone.levelMin} onChange={(e) => onPatch(zone.id, { levelMin: clampNum(e.target.value, 1, zone.levelMax) })} />
             </label>
             <label className="text-dim">Level max
-              <input className="px-input" aria-label="Zone level max" type="number" min={zone.levelMin} max={100} value={zone.levelMax} onChange={(e) => onPatch(zone.id, { levelMax: clampNum(e.target.value, zone.levelMin, 100) })} />
+              <input className="px-input" aria-label="Zone level max" type="number" min={zone.levelMin} max={1000} value={zone.levelMax} onChange={(e) => onPatch(zone.id, { levelMax: clampNum(e.target.value, zone.levelMin, 1000) })} />
             </label>
             <label className="text-dim">Count
               <input className="px-input" aria-label="Zone enemy count" type="number" min={1} max={40} value={zone.count} onChange={(e) => onPatch(zone.id, { count: clampNum(e.target.value, 1, 40) })} />

@@ -8,7 +8,13 @@ import {
   CLASS_BY_ID,
   LEGACY_CLASS,
   type ClassId,
+  ENCHANTS,
   ENCHANT_BY_ID,
+  MAX_CHARACTER_LEVEL,
+  MAX_SKILL_LEVEL,
+  MAX_GEAR_ENCHANTS,
+  perkText,
+  xpNeed,
   ANIMAL_BY_ID,
   ITEM_BY_ID,
   ITEMS,
@@ -76,6 +82,7 @@ import {
   type FxId,
 } from "./content";
 import type { GraveBody } from "./social-types";
+import { readAccountMeta, writeAccountMeta } from "./account-save";
 import { aptitudeOf, buffLines, classProfile, classGendered, IMMUNE_LABEL, STAT_LABEL, TRAIT_BY_ID } from "./classes";
 import { drawActor, drawMonster, drawSetAura, drawShadowName, fxColor } from "./sprites";
 import { expandZones, mapToWorld, savedMaps } from "./map-format";
@@ -158,7 +165,7 @@ export type Snap = {
   accountXp: number;
   accountNeed: number;
   perkPoints: number;
-  perks: { id: string; name: string; power: number; about: string }[];
+  perks: { id: string; name: string; power: number; max: number; about: string }[];
   bounty: string;
   bountyPlace: string;
   unstuck: number;
@@ -645,6 +652,7 @@ export class TurbzGame {
 		this.syncHud(true);
 	}
 	begin(name, race: RaceId, as, classId: ClassId = LEGACY_CLASS[race], traitId: string | null = null, female = true) {
+		this.captureProgress(this.peekRuleSave());
 		const seed = Math.random() * 1e9 | 0;
 		const rng = mulberry32(seed ^ 91);
 		const type = CLASS_BY_ID[classId].type;
@@ -815,7 +823,7 @@ export class TurbzGame {
 		const hunter = Math.max(1, this.save?.level ?? s.level ?? 1);
 		const hc = this.rules === "hardcore" ? this.threat().lv : 0;
 		const near = this.rules === "hardcore" ? Math.max(hunter - 1, levelNearHunter(hunter, Math.random())) + hc : levelNearHunter(hunter, Math.random());
-		const level = s.fixedLevel ? Math.max(1, Math.min(100, s.level | 0)) : s.dungeonBoss ? Math.max(1, s.level) + hc : s.boss ? Math.max(s.level, hunter + 1 + (Math.random() * 4 | 0)) + hc : near;
+		const level = s.fixedLevel ? Math.max(1, Math.min(1000, s.level | 0)) : s.dungeonBoss ? Math.max(1, s.level) + hc : s.boss ? Math.max(s.level, hunter + 1 + (Math.random() * 4 | 0)) + hc : near;
 		const rarity = s.dungeonBoss ? 0 : rarityForLevel(level, Math.random(), !!s.boss);
 		const threat = this.threat();
 		const max0 = animal ? Math.floor(14 + level * 7) : Math.floor((26 + level * 16) * (s.dungeonBoss ? 3.0 : s.boss ? 6.5 : 1) * (1 + rarity * 0.45));
@@ -1421,7 +1429,8 @@ export class TurbzGame {
 		const save = this.save;
 		if (!nearestWaterTile(this.world, save.x, save.y, 80)) { this.say("Stand beside water to fish."); return; }
 		const perk = 1 - Math.min(75, this.chan("fish_luck")) / 100;
-		const wait = (FISH_BITE_MIN + Math.random() * (FISH_BITE_MAX - FISH_BITE_MIN)) * perk;
+		const skill = 1 - Math.min(70, this.skillN("fishing") * 0.175) / 100;
+		const wait = (FISH_BITE_MIN + Math.random() * (FISH_BITE_MAX - FISH_BITE_MIN)) * perk * skill;
 		this.dest = null;
 		if (this.autoplay) { this.path = []; this.pathI = 0; }
 		this.channel = { kind: "fishing", x: save.x, y: save.y, map: save.map, t: 0, need: Math.max(.25, wait) };
@@ -1559,7 +1568,7 @@ export class TurbzGame {
 		let dmg = (11 + save.level * 2.4 + (weapon ? equipmentStats(weapon).damage : 8)) * phys * this.stab(type) * tm;
 		dmg *= 1 + this.chan("might") / 100;
 		dmg *= Math.max(.2, 1 + this.mod("might") / 100);
-		dmg *= 1 + Math.min(.4, (save.skills.hunting.level - 1) * .004);
+		dmg *= this.offenseFactor(mob, "melee");
 		if (mob.boss) dmg *= 1 + this.chan("boss_bane") / 100;
 		this.damageMob(mob, Math.max(1, dmg), false);
 		this.gainSkill("physical", 2);
@@ -1689,7 +1698,7 @@ export class TurbzGame {
 		const form = attackForm(move);
 		let cd = Math.max(.28, (.55 + move.power / 90 - move.priority * .08) * (1 - Math.min(.4, swift / 100)));
 		if (tactic === "heavy" || tactic === "channel") cd *= 1.7;
-		else if (form === "spell") cd *= 1.35;
+		else if (form === "spell") cd *= 1.35 * (1 - Math.min(.45, this.skillN("magic") * 0.00113)) * (1 - Math.min(.35, this.chan("focus") / 100));
 		else if (form === "melee") cd *= .8;
 		if (tactic === "roll") cd = Math.max(cd, 2.6);
 		if (tactic === "ward") cd = Math.max(cd, 5.5);
@@ -1890,26 +1899,25 @@ export class TurbzGame {
 		}
 		const gearStab = pure ? 1 : this.stab(move.type);
 		const might = 1 + this.chan("might") / 100;
-		const hunt = 1 + Math.min(.4, (save.skills.hunting.level - 1) * .004);
 		const boss = mob.boss ? 1 + this.chan("boss_bane") / 100 : 1;
 		const gloom = this.status.some((s) => s.id === "gloom") ? .8 : 1;
 		const critChance = move.crit + this.chan("crit_edge") + (this.buff.t > 0 ? this.buff.crit : 0) + this.mod("crit");
 		const crit = Math.random() * 100 < critChance;
-		const phys = form === "spell" ? 1 : 1 + (save.skills.physical.level - 1) * (form === "melee" ? .02 : .015);
-		const mag = form === "spell" ? 1.45 * (1 + (save.skills.magic.level - 1) * .025) : 1;
+		const phys = form === "spell" ? 1 : 1 + this.skillN("physical") * (form === "melee" ? .02 : .015);
+		const mag = form === "spell" ? 1.45 * (1 + this.skillN("magic") * .025) * (1 + this.chan("spellweave") / 100) * (1 + this.chan("hymn") / 100) : 1;
 		const melee = form === "melee" ? 1.35 : 1;
 		const read = bodyRead(mob.type);
 		const hide = form === "spell" || moveTactic(move) === "channel" ? read.kind === "magic" ? 1.2 : .8 : read.kind === "physical" ? 1.2 : .8;
-		let dmg = (6 + move.power * .42 + (form !== "spell" && this.piece("weapon") ? equipmentStats(this.piece("weapon")).damage * .35 : 0)) * (1 + save.level * .045) * gearStab * tm * might * hunt * boss * gloom * phys * mag * melee * hide * mult * (fromPet ? .62 : 1) * (crit ? 1.75 : 1);
+		let dmg = (6 + move.power * .42 + (form !== "spell" && this.piece("weapon") ? equipmentStats(this.piece("weapon")).damage * .35 : 0)) * (1 + save.level * .045) * gearStab * tm * might * this.offenseFactor(mob, form) * boss * gloom * phys * mag * melee * hide * mult * (fromPet ? .62 : 1) * (crit ? 1.75 * (1 + Math.min(.8, this.chan("crit_force") / 100)) : 1);
 		if (!fromPet) dmg *= abilityMultiplier(save, move.id);
 		if (!fromPet) {
 			dmg *= Math.max(.2, 1 + this.mod(form === "spell" || moveTactic(move) === "channel" ? "arcana" : "might") / 100);
 			if (move.type === CLASS_BY_ID[save.classId]?.type) dmg *= 1 + this.mod("affinity") / 100;
 		}
-		if (form === "ranged") dmg = mitigate(dmg, this.mobArmor(mob));
+		if (form === "ranged") dmg = mitigate(dmg, this.mobArmor(mob) - this.chan("armor_crack"));
 		if (mob.status.some((s) => s.id === "expose")) dmg *= 1.25;
 		dmg = Math.max(1, dmg);
-		let hits = Math.random() * 100 < this.chan("double_strike") ? 2 : 1;
+		let hits = Math.random() * 100 < Math.min(85, this.chan("double_strike")) ? 2 : 1;
 		if (form === "ranged" && rangedStyle(move) === "volley") {
 			hits = 3;
 			dmg *= .55;
@@ -1917,6 +1925,7 @@ export class TurbzGame {
 		for (let i = 0; i < hits; i++) this.damageMob(mob, dmg, crit && i === 0);
 		this.applyEffect(move, mob, true);
 		if (!fromPet && this.mod("leech") > 0) save.hp = Math.min(this.maxHp(), save.hp + dmg * this.mod("leech") / 100);
+		if (!fromPet && this.chan("leech_edge") > 0) save.hp = Math.min(this.maxHp(), save.hp + dmg * this.chan("leech_edge") / 100);
 		if (move.effect === "leech" && (this.rules !== "hardcore" || attackForm(move) === "spell")) save.hp = Math.min(this.maxHp(), save.hp + dmg * .35);
 		mob.status = mob.status.filter((s) => s.id !== "sleep");
 	}
@@ -2000,7 +2009,7 @@ export class TurbzGame {
 			this.persist();
 			return;
 		}
-		const luck = this.chan("loot_find");
+		const luck = this.chan("loot_find") + this.chan("fortune");
 		const dropP = mob.boss ? 1 : Math.min(0.92, 0.12 + mob.level * 0.016 + mob.rarity * 0.08 + luck / 200);
 		if (Math.random() < dropP) {
 			const floors = [null, "fine", "rare", "epic", "legendary"];
@@ -2042,9 +2051,8 @@ export class TurbzGame {
 	tryRecruit(mob: Mob) {
 		const save = this.save;
 		if (!save || mob.animal || mob.boss || mob.witch || mob.id.startsWith("shrine") || mob.master) return;
-		const catchLv = save.skills.catching?.level ?? 1;
 		const jar = (save.jarLeft ?? 0) > 0 ? 0.45 : 0;
-		const chance = Math.min(0.92, 0.12 + Math.min(0.22, (catchLv - 1) * 0.004) + this.chan("catch_boost") / 220 + mob.rarity * 0.03 + jar);
+		const chance = Math.min(0.92, 0.12 + this.skillN("catching") * 0.0012 + this.chan("catch_boost") / 220 + mob.rarity * 0.03 + jar);
 		if (Math.random() > chance) return;
 		save.spirits = save.spirits ?? [];
 		if (save.spirits.length >= 20) {
@@ -2113,7 +2121,7 @@ export class TurbzGame {
 		if (!st || st.done) return;
 		st.done = true;
 		const def = QUESTS.find((q) => q.id === id);
-		save.kyo += def.rewardKyo;
+		save.kyo += Math.floor(def.rewardKyo * (1 + this.skillN("social") * 0.0015));
 		if (def.rewardItems) {
 			for (const [k, n] of Object.entries(def.rewardItems)) if (n > 0 && ITEM_BY_ID[k]) this.giveItem(k, n);
 		}
@@ -2142,16 +2150,17 @@ export class TurbzGame {
 		save.xp += grant;
 		this.gainAccount(grant);
 		let need = xpNeed(save.level);
-		while (save.xp >= need && save.level < 50) {
+		while (save.xp >= need && save.level < MAX_CHARACTER_LEVEL) {
 			save.xp -= need;
 			save.level += 1;
 			save.skillPoints = (save.skillPoints ?? 0) + POINTS_PER_LEVEL;
 			if (this.rules !== "hardcore") save.hp = this.maxHp();
-			this.say(`Level ${save.level}. +3 skill points.`);
+			this.say(save.level >= MAX_CHARACTER_LEVEL ? `Level ${MAX_CHARACTER_LEVEL}. The body cannot climb higher. Skills still can.` : `Level ${save.level}/${MAX_CHARACTER_LEVEL}. +${POINTS_PER_LEVEL} skill points.`);
 			this.tone(480, .12, "square");
 			this.maybeEvilWitch();
 			need = xpNeed(save.level);
 		}
+		if (save.level >= MAX_CHARACTER_LEVEL) save.xp = Math.min(save.xp, need);
 	}
 	maybeEvilWitch() {
 		const save = this.save;
@@ -2218,17 +2227,35 @@ export class TurbzGame {
 	}
 	gainSkill(id, amount) {
 		const st = this.save.skills[id];
-		if (!st || st.level >= 60) return;
+		if (!st || st.level >= MAX_SKILL_LEVEL) return;
 		amount = Math.max(1, Math.round(amount * aptitudeOf(this.save.classId, id)));
 		const gain = this.rules === "hardcore" ? Math.max(1, Math.floor(amount * 2.4)) : amount;
 		st.xp += gain;
-		const need = skillNeed(st.level);
-		if (st.xp >= need) {
-			st.xp -= need;
+		let ups = 0;
+		while (st.xp >= skillNeed(st.level) && st.level < MAX_SKILL_LEVEL) {
+			st.xp -= skillNeed(st.level);
 			st.level += 1;
-			this.say(`${id} ${st.level}. ${skillLine(id, st.level)}`);
+			ups += 1;
+		}
+		if (st.level >= MAX_SKILL_LEVEL) st.xp = 0;
+		if (ups) {
+			const name = SKILLS.find((sk) => sk.id === id)?.name ?? id;
+			this.say(`${name} ${st.level}/${MAX_SKILL_LEVEL}. ${skillLine(id, st.level)}`);
 			this.tone(700, .08, "triangle");
 		}
+	}
+	skillN(id) {
+		return Math.max(0, Math.min(MAX_SKILL_LEVEL, this.save?.skills?.[id]?.level ?? 1) - 1);
+	}
+	offenseFactor(mob, form) {
+		const save = this.save;
+		let m = 1 + this.skillN("hunting") * 0.002;
+		if (form === "ranged") m *= 1 + this.chan("hunter_eye") / 100;
+		else if (form !== "spell") m *= 1 + this.chan("edge") / 100;
+		if (save && save.hp < this.maxHp() * 0.4) m *= 1 + this.chan("last_stand") / 100;
+		if (mob && mob.max > 0 && mob.hp < mob.max * 0.35) m *= 1 + this.chan("execute") / 100;
+		if (mob && save && mob.level > save.level) m *= 1 + this.chan("giant_bane") / 100;
+		return m;
 	}
 	tickMobs(dt) {
 		const save = this.save;
@@ -2411,7 +2438,7 @@ export class TurbzGame {
 		dmg *= 1 - Math.min(.45, this.chan("ward") / 160 + this.buff.ward);
 		if (this.status.some((s) => s.id === "shell")) dmg *= .7;
 		dmg *= 1 - Math.max(-.5, Math.min(.6, this.mod("guard") / 100));
-		if (Math.random() * 100 < this.chan("echo_guard")) {
+		if (Math.random() * 100 < Math.min(40, this.chan("echo_guard"))) {
 			this.float(save.x, save.y - 36, "ECHO", "#6a4cff");
 			return;
 		}
@@ -2464,6 +2491,11 @@ export class TurbzGame {
 		this.shake = Math.max(this.shake, 3);
 		this.float(save.x, save.y - 42, `${Math.floor(dmg)}`, "#c4473a");
 		this.combat = 3;
+		const thorns = this.chan("thorns");
+		if (thorns > 0) {
+			const foe = this.nearestMob(save.x, save.y, 220);
+			if (foe?.alive) this.applyMobDamage(foe, Math.max(1, Math.floor(dmg * Math.min(.35, thorns / 100))), false);
+		}
 		if (effect && effect !== "none" && effect !== "mend") this.addStatus(effect, 3.5);
 		if (save.hp <= 0) {
 			if (this.chan("second_chance") >= 1 && !this.secondUsed) {
@@ -2488,7 +2520,7 @@ export class TurbzGame {
 		this.dest = null;
 		publish({ panel: "rebirth" });
 		this.persist();
-		this.say("This witch is gone. Her levels and kit became Account Score. Choose the next body.");
+		this.say("This witch is gone. Her levels and kit became Account Score. Skills, account level, and permanent bonuses stay.");
 		this.tone(70, .3, "sawtooth");
 		this.syncHud(true);
 	}
@@ -2598,7 +2630,7 @@ export class TurbzGame {
 			death: []
 		});
 		const dressed = wear ? SET_BY_ID[wear].name : "the default robes";
-		this.say(`${save.name} wakes at ${tavern.name} in ${dressed}. The board is by the door.`);
+		this.say(`${save.name} wakes at ${tavern.name} in ${dressed}. Skills stayed with the account. The board is by the door.`);
 		this.persist();
 		this.syncHud(true);
 	}
@@ -2662,19 +2694,20 @@ export class TurbzGame {
 		this.depleteNode(id);
 		const luck = 1 + this.chan("harvest") / 100;
 		if (node === "ore") {
-			const n = Math.max(1, Math.floor((1 + Math.random()) * luck));
+			const n = Math.max(1, Math.floor((1 + Math.random()) * luck * (1 + this.skillN("mining") * 0.003)));
 			this.giveItem("ore", n);
 			this.gainSkill("mining", 14);
 			this.say(`Ore x${n}.`);
 		} else if (node === "tree") {
-			const n = Math.max(1, Math.floor((1 + Math.random()) * luck));
+			const n = Math.max(1, Math.floor((1 + Math.random()) * luck * (1 + this.skillN("woodcutting") * 0.003)));
 			this.giveItem("timber", n);
 			this.gainSkill("woodcutting", 14);
 			this.say(`Timber x${n}.`);
 		} else if (node === "shroom") {
 			const bonus = this.chan("shroom_sense");
-			this.giveItem(Math.random() < .34 ? "dreamspore" : Math.random() < .5 ? "embercap" : "blue_lantern", 1 + (bonus > 20 ? 1 : 0));
-			this.giveItem("mushroom", 1);
+			const extra = Math.random() < Math.min(0.8, this.skillN("shroom") * 0.002) ? 1 : 0;
+			this.giveItem(Math.random() < .34 ? "dreamspore" : Math.random() < .5 ? "embercap" : "blue_lantern", 1 + (bonus > 20 ? 1 : 0) + extra);
+			this.giveItem("mushroom", 1 + extra);
 			this.gainSkill("shroom", 16);
 			this.say("The patch gives.");
 		}
@@ -3177,20 +3210,21 @@ export class TurbzGame {
 		this.depleteNode(id);
 		const luck = 1 + this.chan("harvest") / 100;
 		if (node === "ore") {
-			const n = Math.max(1, Math.floor((1 + Math.random()) * luck));
+			const n = Math.max(1, Math.floor((1 + Math.random()) * luck * (1 + this.skillN("mining") * 0.003)));
 			this.giveItem("ore", n);
 			if (Math.random() < 0.45) this.giveItem("ironroot", 1);
 			this.gainSkill("mining", 14);
 			this.say(`Ore x${n}.`);
 		} else if (node === "tree") {
-			const n = Math.max(1, Math.floor((1 + Math.random()) * luck));
+			const n = Math.max(1, Math.floor((1 + Math.random()) * luck * (1 + this.skillN("woodcutting") * 0.003)));
 			this.giveItem("timber", n);
 			this.gainSkill("woodcutting", 14);
 			this.say(`Timber x${n}.`);
 		} else if (node === "shroom") {
 			const bonus = this.chan("shroom_sense");
-			this.giveItem(Math.random() < .34 ? "dreamspore" : Math.random() < .5 ? "embercap" : "blue_lantern", 1 + (bonus > 20 ? 1 : 0));
-			this.giveItem("mushroom", 1);
+			const extra = Math.random() < Math.min(0.8, this.skillN("shroom") * 0.002) ? 1 : 0;
+			this.giveItem(Math.random() < .34 ? "dreamspore" : Math.random() < .5 ? "embercap" : "blue_lantern", 1 + (bonus > 20 ? 1 : 0) + extra);
+			this.giveItem("mushroom", 1 + extra);
 			this.gainSkill("shroom", 16);
 			this.say("The patch gives.");
 		}
@@ -3440,7 +3474,8 @@ export class TurbzGame {
 		}
 		if (def.heal || def.buff) save.bag[id] -= 1;
 		if (def.heal && this.rules !== "hardcore") {
-			save.hp = Math.min(this.maxHp(), save.hp + def.heal);
+			const heal = Math.floor(def.heal * (1 + this.chan("potion_sip") / 100));
+			save.hp = Math.min(this.maxHp(), save.hp + heal);
 			this.say(`${def.name}.`);
 		}
 		if (def.buff) this.say(`${def.name} · 25 seconds.`);
@@ -3501,7 +3536,7 @@ export class TurbzGame {
 		if (i < 0) return;
 		const g = save.gear[i];
 		if (Object.values(save.equipped).includes(uid)) return this.say("Equip a replacement before selling worn gear.");
-		const mult = (1 + Math.min(.5, (save.skills.trading.level - 1) * .01)) * (1 + this.chan("sell_boost") / 100);
+		const mult = (1 + this.skillN("trading") * 0.002) * (1 + this.chan("sell_boost") / 100);
 		save.kyo += Math.floor(gearPrice(g) * .45 * mult);
 		save.gear.splice(i, 1);
 		if (this.selected === uid) this.selected = null;
@@ -3538,7 +3573,7 @@ export class TurbzGame {
 	}
 	price(n) {
 		const save = this.save;
-		const shop = Math.max(.55, 1 - (save.skills.trading.level - 1) * .008);
+		const shop = Math.max(.5, 1 - this.skillN("trading") * 0.00125);
 		const charm = 1 - this.chan("shop_charm") / 140;
 		return Math.max(1, Math.floor(n * shop * charm));
 	}
@@ -3562,6 +3597,7 @@ export class TurbzGame {
 		}
 		for (const [id, n] of Object.entries(recipe.costs)) save.bag[id] -= n;
 		this.giveItem(recipe.output, recipe.n);
+		if (Math.random() < Math.min(0.5, this.skillN("alchemy") * 0.00125)) this.giveItem(recipe.output, recipe.n);
 		this.gainSkill("alchemy", 18);
 		this.say(`Brewed ${ITEM_BY_ID[recipe.output]?.name ?? recipe.name}.`);
 		this.persist();
@@ -3595,7 +3631,7 @@ export class TurbzGame {
 		const g = save.gear.find((x) => x.uid === this.selected);
 		const e = save.stash[index];
 		if (!g || !e) return;
-		if (g.enchants.length >= 8) return this.say("That piece is full.");
+		if (g.enchants.length >= MAX_GEAR_ENCHANTS) return this.say("That piece already holds 20 enchantments.");
 		const exist = g.enchants.find((x) => x.id === e.id);
 		if (exist) exist.power = Math.min(ENCHANT_BY_ID[e.id]?.max ?? 99, exist.power + e.power);
 		else g.enchants.push(e);
@@ -3988,20 +4024,21 @@ export class TurbzGame {
 	spendPerk(id) {
 		const save = this.save;
 		const def = ENCHANT_BY_ID[id];
-		if (!save || !def) return;
+		const perk = def?.perk;
+		if (!save || !def || !perk) return;
 		if (save.perkPoints <= 0) {
 			this.say("No perk points.");
 			return;
 		}
 		const cur = save.perks[id] ?? 0;
-		const step = Math.max(1, Math.round(def.max / 8));
-		if (cur + step > def.max) {
-			this.say(`${def.name} is full.`);
+		if (cur >= perk.max) {
+			this.say(`${def.name} is full at ${perk.max}.`);
 			return;
 		}
-		save.perks[id] = cur + step;
+		const next = Math.min(perk.max, cur + perk.step);
+		save.perks[id] = next;
 		save.perkPoints -= 1;
-		this.say(`${def.name} +${step}. Permanent.`);
+		this.say(`${def.name} ${next}/${perk.max}. ${perk.each}.`);
 		this.persist();
 		this.syncHud(true);
 	}
@@ -4037,7 +4074,7 @@ export class TurbzGame {
 			"fish"
 		];
 		let kyo = 0;
-		const charm = 1 + this.chan("sell_boost") / 100 + Math.min(.3, (save.skills.trading.level - 1) * .01);
+		const charm = 1 + this.chan("sell_boost") / 100 + this.skillN("trading") * 0.002;
 		for (const id of ids) {
 			const n = save.bag[id] ?? 0;
 			if (n <= 0) continue;
@@ -4123,6 +4160,14 @@ export class TurbzGame {
 			};
 		}
 		save.skills = skills;
+		if ((save.level | 0) > MAX_CHARACTER_LEVEL) save.level = MAX_CHARACTER_LEVEL;
+		for (const sk of SKILLS) {
+			const st = save.skills[sk.id];
+			if (!st) continue;
+			st.level = Math.max(1, Math.min(MAX_SKILL_LEVEL, Math.floor(st.level || 1)));
+			st.xp = Math.max(0, Math.floor(st.xp || 0));
+			if (st.level >= MAX_SKILL_LEVEL) st.xp = 0;
+		}
 		save.quests = save.quests ?? blankQuests();
 		for (const d of QUESTS) if (!save.quests[d.id]) save.quests[d.id] = {
 			n: 0,
@@ -4226,6 +4271,7 @@ export class TurbzGame {
 		if (save.map.startsWith("rift-") && !save.dungeons.portals.some(p => p.id === save.map)) { save.map = "world"; Object.assign(save, hearthXY()); }
 		if (save.map.startsWith("custom-") && !savedMaps().some((m) => `custom-${m.id}` === save.map)) { save.map = "world"; Object.assign(save, hearthXY()); }
 		for (const g of save.gear) migrateEquipment(g);
+		this.foldAccount(save);
 		this.syncArsenal(save);
 	}
 	gainAccount(n) {
@@ -4308,7 +4354,7 @@ export class TurbzGame {
 	maxHp() {
 		const save = this.save;
 		if (!save) return 80;
-		return Math.max(20, Math.floor((78 + save.level * 12 + this.chan("ward") * .8 + this.chan("spark_life") * .5) * (1 + this.mod("hp") / 100)));
+		return Math.max(20, Math.floor((78 + save.level * 12 + this.chan("spark_life") + this.chan("vitality")) * (1 + this.mod("hp") / 100)));
 	}
 	armorType() {
 		return (this.piece("chest") ?? this.piece("weapon"))?.type ?? "normal";
@@ -4336,7 +4382,7 @@ export class TurbzGame {
 	}
 	speedMult() {
 		const swift = this.status.some((s) => s.id === "swift") ? 1.45 : 1;
-		return Math.max(.5, 1 + this.mod("speed") / 100) * swift;
+		return Math.max(.5, 1 + this.mod("speed") / 100) * swift * (1 + Math.min(.45, this.chan("swift_step") / 100));
 	}
 	addStatus(id, t) {
 		if (id === "none") return;
@@ -4349,6 +4395,81 @@ export class TurbzGame {
 			t
 		});
 	}
+
+	peekRuleSave() {
+		const cached = this.rules === "hardcore" ? this.cloudHard : this.cloudCache;
+		if (cached && cached.skills) return cached;
+		try {
+			const key = this.rules === "hardcore" ? HC_KEY : SAVE_KEY;
+			const text = localStorage.getItem(key);
+			return text ? JSON.parse(text) : null;
+		} catch {
+			return null;
+		}
+	}
+	captureProgress(raw) {
+		if (!raw || typeof raw !== "object") return;
+		const save = {
+			skills: blankSkills(),
+			accountLevel: raw.accountLevel || 1,
+			accountXp: raw.accountXp || 0,
+			perkPoints: raw.perkPoints || 0,
+			perks: { ...(raw.perks || {}) },
+			accountScore: raw.accountScore || 0,
+			ghostSlots: raw.ghostSlots || 0
+		};
+		for (const sk of SKILLS) {
+			const had = raw.skills?.[sk.id];
+			if (had && had.level) save.skills[sk.id] = { level: had.level, xp: had.xp || 0 };
+		}
+		this.foldAccount(save);
+	}
+	foldAccount(save) {
+		const meta = readAccountMeta();
+		if (meta) {
+			const skills = meta.skills && typeof meta.skills === "object" ? meta.skills : {};
+			for (const sk of SKILLS) {
+				const had = skills[sk.id];
+				const cur = save.skills?.[sk.id];
+				if (!had || !cur) continue;
+				const lv = Math.max(1, Math.min(MAX_SKILL_LEVEL, had.level | 0));
+				const xp = Math.max(0, had.xp | 0);
+				if (lv > cur.level || (lv === cur.level && xp > (cur.xp | 0))) {
+					cur.level = lv;
+					cur.xp = lv >= MAX_SKILL_LEVEL ? 0 : xp;
+				}
+			}
+			save.accountLevel = Math.max(save.accountLevel || 1, meta.accountLevel | 0 || 1);
+			save.accountXp = Math.max(save.accountXp || 0, meta.accountXp | 0 || 0);
+			save.perkPoints = Math.max(save.perkPoints || 0, meta.perkPoints | 0 || 0);
+			save.perks = save.perks || {};
+			const perks = meta.perks && typeof meta.perks === "object" ? meta.perks : {};
+			for (const [id, n] of Object.entries(perks)) {
+				const v = Math.max(0, n | 0);
+				if (v > (save.perks[id] ?? 0)) save.perks[id] = v;
+			}
+			save.accountScore = Math.max(save.accountScore ?? 0, meta.accountScore | 0 || 0);
+			save.ghostSlots = Math.max(save.ghostSlots | 0, meta.ghostSlots | 0 || 0);
+		}
+		this.writeProgress(save);
+	}
+	writeProgress(save) {
+		if (!save?.skills) return;
+		const skills = {};
+		for (const sk of SKILLS) {
+			const st = save.skills[sk.id];
+			skills[sk.id] = { level: Math.max(1, Math.min(MAX_SKILL_LEVEL, st?.level | 0 || 1)), xp: Math.max(0, st?.xp | 0 || 0) };
+		}
+		writeAccountMeta({
+			skills,
+			accountLevel: save.accountLevel || 1,
+			accountXp: save.accountXp || 0,
+			perkPoints: save.perkPoints || 0,
+			perks: save.perks || {},
+			accountScore: save.accountScore ?? 0,
+			ghostSlots: save.ghostSlots || 0
+		});
+	}
 	persist() {
 		if (!this.save) return;
 		for (const g of this.save.gear) this.noteFound(g);
@@ -4359,6 +4480,7 @@ export class TurbzGame {
 		try { localStorage.setItem(key, localJson); } catch {
 			if (!this.storageWarned) { this.storageWarned = true; this.say("Local saving is unavailable. Keep this tab open to retain your progress."); }
 		}
+		this.writeProgress(this.save);
 		if (!this.cloudFn) return;
 		const json = JSON.stringify({ slot: this.rules === "hardcore" ? "hardcore" : "hunt", save: this.save });
 		window.clearTimeout(this.cloudTimer);
@@ -4987,11 +5109,12 @@ export class TurbzGame {
 			accountXp: save.accountXp,
 			accountNeed: accountNeed(save.accountLevel),
 			perkPoints: save.perkPoints,
-			perks: Object.entries(ENCHANT_BY_ID).map(([id, def]) => ({
-				id,
+			perks: ENCHANTS.filter((def) => def.perk).map((def) => ({
+				id: def.id,
 				name: def.name,
-				power: save.perks[id] ?? 0,
-				about: def.about
+				power: save.perks[def.id] ?? 0,
+				max: def.perk.max,
+				about: perkText(def, save.perks[def.id] ?? 0)
 			})),
 			bounty: (() => {
 				const mark = this.liveBounty();
@@ -6077,9 +6200,6 @@ export class TurbzGame {
 		this.float(master.x, master.y - 46, "SUMMON", "#c9a6e8");
 		this.say(`${master.name} calls ${pet.name}.`);
 	}
-}
-function xpNeed(level) {
-	return Math.floor(28 * Math.pow(1.2, level - 1));
 }
 function typeChart(a, d) {
 	if (TYPES[d].immune.includes(a)) return 0;

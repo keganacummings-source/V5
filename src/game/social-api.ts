@@ -203,7 +203,7 @@ export const postGrave = createServerFn({ method: "POST" })
     const name = String(data?.name ?? "").slice(0, 24).trim();
     if (!name) throw new Error("Nameless grave");
     const score = Math.max(0, Math.min(1_000_000_000, Math.floor(Number(data?.score) || 0)));
-    const level = Math.max(1, Math.min(99, Math.floor(Number(data?.level) || 1)));
+    const level = Math.max(1, Math.min(400, Math.floor(Number(data?.level) || 1)));
     const race = String(data?.race ?? "Unknown").slice(0, 24);
     const body: GraveBody = {
       mode,
@@ -214,15 +214,15 @@ export const postGrave = createServerFn({ method: "POST" })
       accountScore: Math.max(0, Math.floor(Number(data?.accountScore) || 0)),
       skills: Array.isArray(data?.skills) ? data.skills.slice(0, 16).map((sk) => ({
         name: String(sk?.name ?? "").slice(0, 24),
-        level: Math.max(0, Math.min(99, Math.floor(Number(sk?.level) || 0))),
+        level: Math.max(0, Math.min(400, Math.floor(Number(sk?.level) || 0))),
       })) : [],
       gear: Array.isArray(data?.gear) ? data.gear.slice(0, 8).map((g) => ({
         slot: String(g?.slot ?? "").slice(0, 16),
         name: String(g?.name ?? "").slice(0, 80),
-        level: Math.max(0, Math.min(99, Math.floor(Number(g?.level) || 0))),
+        level: Math.max(0, Math.min(1000, Math.floor(Number(g?.level) || 0))),
         quality: String(g?.quality ?? "").slice(0, 16),
         type: String(g?.type ?? "").slice(0, 16),
-        enchants: Array.isArray(g?.enchants) ? g.enchants.slice(0, 8).map((e) => ({
+        enchants: Array.isArray(g?.enchants) ? g.enchants.slice(0, 20).map((e) => ({
           name: String(e?.name ?? "").slice(0, 32),
           power: Math.max(0, Math.min(999, Math.floor(Number(e?.power) || 0))),
         })) : [],

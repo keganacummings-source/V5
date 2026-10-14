@@ -45,10 +45,10 @@ export function levelNearHunter(hunter: number, roll: number): number {
   return Math.max(1, Math.floor(hunter) + delta);
 }
 
-/** 0 common, 1 uncommon, 2 rare, 3 epic. Higher levels shift the roll up. */
+/** 0 common, 1 uncommon, 2 rare, 3 epic. The shift keeps climbing until the mid hundreds. */
 export function rarityForLevel(level: number, roll: number, boss = false): number {
   if (boss) return 3;
-  const t = Math.max(0, Math.min(1, (level - 1) / 40));
+  const t = Math.max(0, Math.min(1, (level - 1) / 200));
   const epic = 0.04 + t * 0.28;
   const rare = 0.1 + t * 0.24;
   const uncommon = 0.2 + t * 0.16;
@@ -578,30 +578,80 @@ export function rollGhostLook(rng: Rng, rarity: number, move: string, bias?: "hu
   };
 }
 
-export const ENCHANTS: { id: string; name: string; about: string; max: number; unit: "%" | "flat" }[] = [
-  { id: "double_strike", name: "Double Strike", about: "Chance to hit twice", max: 40, unit: "%" },
-  { id: "second_chance", name: "Second Chance", about: "Once, break instead of dying", max: 1, unit: "flat" },
-  { id: "loot_find", name: "Loot Find", about: "Better drops", max: 50, unit: "%" },
-  { id: "xp_boost", name: "XP Boost", about: "More battle XP", max: 40, unit: "%" },
-  { id: "catch_boost", name: "Catch Boost", about: "Jars hold tighter", max: 30, unit: "%" },
-  { id: "kyo_find", name: "Kyo Magnet", about: "More Kyo", max: 45, unit: "%" },
-  { id: "ward", name: "Ward", about: "Take less damage", max: 35, unit: "%" },
-  { id: "might", name: "Might", about: "Deal more damage", max: 35, unit: "%" },
-  { id: "swift", name: "Swift", about: "Lower cooldowns", max: 25, unit: "%" },
-  { id: "harvest", name: "Harvest", about: "Better node yields", max: 40, unit: "%" },
-  { id: "fish_luck", name: "Fish Luck", about: "Faster bites", max: 40, unit: "%" },
-  { id: "shop_charm", name: "Shop Charm", about: "Cheaper shops", max: 30, unit: "%" },
-  { id: "sell_boost", name: "Merchant Tongue", about: "Higher sell prices", max: 30, unit: "%" },
-  { id: "crit_edge", name: "Crit Edge", about: "Higher crit chance", max: 25, unit: "%" },
-  { id: "regen", name: "Afterglow", about: "Heal after a kill", max: 20, unit: "%" },
-  { id: "boss_bane", name: "Boss Bane", about: "Extra damage to bosses", max: 40, unit: "%" },
-  { id: "shroom_sense", name: "Shroom Sense", about: "Richer mushrooms", max: 35, unit: "%" },
-  { id: "echo_guard", name: "Echo Guard", about: "Chance to ignore a hit", max: 15, unit: "%" },
-  { id: "spark_life", name: "Spark of Life", about: "Bonus spirit when a fight starts", max: 25, unit: "%" },
-  { id: "type_edge", name: "Typed Edge", about: "Extra stab when types match", max: 20, unit: "%" },
+export const MAX_CHARACTER_LEVEL = 400;
+export const MAX_SKILL_LEVEL = 400;
+export const MAX_GEAR_LEVEL = 1000;
+export const MAX_GEAR_ENCHANTS = 20;
+
+export type EnchantDef = {
+  id: string;
+  name: string;
+  /** Ceiling of one roll on a level-1000 piece. */
+  max: number;
+  unit: "%" | "flat";
+  /** Where the roll prefers to land. Omitted enchants can appear on anything. */
+  tag?: "weapon" | "armor" | "relic";
+  gear: (power: number) => string;
+  perk?: { step: number; max: number; each: string };
+};
+
+export const ENCHANTS: EnchantDef[] = [
+  { id: "double_strike", name: "Double Strike", max: 18, unit: "%", tag: "weapon", gear: (n) => `${n}% chance this piece makes the hit land a second time. All Double Strike together cannot rise above 85%.`, perk: { step: 1, max: 12, each: "+1% chance that an attack or spell hits a second time (the total chance cannot rise above 85%)" } },
+  { id: "second_chance", name: "Second Chance", max: 1, unit: "flat", tag: "armor", gear: () => "Once per life, a killing blow leaves you at 1 health instead of dying.", perk: { step: 1, max: 1, each: "one survival at 1 health instead of dying, once per life" } },
+  { id: "loot_find", name: "Loot Find", max: 30, unit: "%", gear: (n) => `+${(n / 2).toFixed(1)}% gear drop chance (Loot Find ${n} ÷ 200).`, perk: { step: 1, max: 20, each: "+0.5% chance that a fallen foe drops gear (1 Loot Find ÷ 200)" } },
+  { id: "xp_boost", name: "XP Boost", max: 30, unit: "%", gear: (n) => `+${n}% battle experience.`, perk: { step: 1, max: 20, each: "+1% experience from fights" } },
+  { id: "catch_boost", name: "Catch Boost", max: 30, unit: "%", gear: (n) => `+${(n / 2.2).toFixed(1)}% chance a fallen foe stays as a spirit (Catch Boost ${n} ÷ 220).`, perk: { step: 1, max: 20, each: "+0.45% chance a fallen foe stays as a spirit (1 Catch Boost ÷ 220)" } },
+  { id: "kyo_find", name: "Kyo Magnet", max: 30, unit: "%", gear: (n) => `+${n}% kyo from fights.`, perk: { step: 1, max: 20, each: "+1% kyo dropped by foes" } },
+  { id: "ward", name: "Ward", max: 24, unit: "%", tag: "armor", gear: (n) => `Damage taken is reduced by Ward÷160. This piece is ${n}, which is ${(n / 1.6).toFixed(1)}% less damage on its own. The reduction from all Ward cannot rise above 45%.`, perk: { step: 1, max: 16, each: "0.625% less damage taken (Ward ÷ 160, and the reduction cannot rise above 45%)" } },
+  { id: "might", name: "Might", max: 24, unit: "%", tag: "weapon", gear: (n) => `+${n}% damage on every attack and spell.`, perk: { step: 1, max: 20, each: "+1% damage on every attack and spell" } },
+  { id: "swift", name: "Swift", max: 20, unit: "%", gear: (n) => `Cooldowns are ${n}% shorter from this piece (the shortening cannot rise above 40%). Also adds ${Math.floor(n / 8)} turn-speed (1 per 8 Swift).`, perk: { step: 1, max: 16, each: "1% shorter cooldowns (cannot shorten by more than 40%) and 1 turn-speed per 8 Swift" } },
+  { id: "harvest", name: "Harvest", max: 30, unit: "%", gear: (n) => `+${n}% ore, timber, and mushrooms from nodes.`, perk: { step: 1, max: 20, each: "+1% ore, timber, and mushrooms from every node" } },
+  { id: "fish_luck", name: "Fish Luck", max: 30, unit: "%", gear: (n) => `Bites come ${n}% sooner from this piece. All Fish Luck together cannot make bites more than 75% sooner.`, perk: { step: 1, max: 20, each: "1% sooner bites (all Fish Luck together cannot pass 75% sooner)" } },
+  { id: "shop_charm", name: "Shop Charm", max: 28, unit: "%", gear: (n) => `Shop prices are about ${(n / 1.4).toFixed(1)}% lower (Shop Charm ${n} ÷ 140).`, perk: { step: 1, max: 20, each: "about 0.7% off every shop price (Shop Charm ÷ 140)" } },
+  { id: "sell_boost", name: "Merchant Tongue", max: 28, unit: "%", gear: (n) => `+${n}% kyo when you sell gear or materials.`, perk: { step: 1, max: 20, each: "+1% kyo when you sell gear or materials" } },
+  { id: "crit_edge", name: "Crit Edge", max: 16, unit: "%", tag: "weapon", gear: (n) => `+${n}% critical chance.`, perk: { step: 1, max: 12, each: "+1% critical chance" } },
+  { id: "regen", name: "Afterglow", max: 20, unit: "flat", tag: "armor", gear: (n) => `Restore ${ (n * 0.4).toFixed(1) } health when a foe falls (Afterglow ${n} × 0.4).`, perk: { step: 1, max: 16, each: "+0.4 health whenever a foe falls" } },
+  { id: "boss_bane", name: "Boss Bane", max: 28, unit: "%", tag: "weapon", gear: (n) => `+${n}% damage to bosses.`, perk: { step: 1, max: 20, each: "+1% damage to bosses" } },
+  { id: "shroom_sense", name: "Shroom Sense", max: 30, unit: "%", gear: (n) => n >= 20 ? `Shroom Sense ${n}. At 20 or more, mushroom nodes drop one extra reagent.` : `Shroom Sense ${n}. At 20 or more, mushroom nodes drop one extra reagent. This piece is not there yet.`, perk: { step: 1, max: 24, each: "1 Shroom Sense. At 20 total, mushroom nodes drop one extra reagent" } },
+  { id: "echo_guard", name: "Echo Guard", max: 12, unit: "%", tag: "armor", gear: (n) => `${n}% chance to ignore an entire hit. All Echo Guard together cannot rise above 40%.`, perk: { step: 1, max: 10, each: "+1% chance to ignore an entire hit (the chance cannot rise above 40%)" } },
+  { id: "spark_life", name: "Spark of Life", max: 40, unit: "flat", tag: "armor", gear: (n) => `+${n} maximum health.`, perk: { step: 2, max: 40, each: "+2 maximum health" } },
+  { id: "type_edge", name: "Typed Edge", max: 16, unit: "%", tag: "weapon", gear: (n) => `+${n}% damage when the attack type matches a worn piece (Typed Edge is added as a fraction: ${n} ÷ 100).`, perk: { step: 1, max: 12, each: "+1% damage when your attack type matches a piece you are wearing" } },
+  { id: "whetstone", name: "Whetstone", max: 220, unit: "flat", tag: "weapon", gear: (n) => `+${n} weapon damage, before level and skill multipliers.` },
+  { id: "spellweave", name: "Spellweave", max: 22, unit: "%", tag: "weapon", gear: (n) => `+${n}% spell damage.` },
+  { id: "edge", name: "Keen Edge", max: 18, unit: "%", tag: "weapon", gear: (n) => `+${n}% melee damage.` },
+  { id: "hunter_eye", name: "Hunter's Eye", max: 18, unit: "%", tag: "weapon", gear: (n) => `+${n}% ranged damage.` },
+  { id: "hymn", name: "Hymn", max: 18, unit: "%", tag: "weapon", gear: (n) => `+${n}% spell damage, stacking with Spellweave.` },
+  { id: "execute", name: "Execute", max: 20, unit: "%", tag: "weapon", gear: (n) => `+${n}% damage to foes under 35% health.` },
+  { id: "giant_bane", name: "Giant Bane", max: 20, unit: "%", tag: "weapon", gear: (n) => `+${n}% damage to foes above your level.` },
+  { id: "last_stand", name: "Last Stand", max: 18, unit: "%", tag: "armor", gear: (n) => `+${n}% damage while you are under 40% health.` },
+  { id: "crit_force", name: "Crit Force", max: 18, unit: "%", tag: "weapon", gear: (n) => `Critical hits deal +${n}% extra damage. All Crit Force together cannot add more than 80%.` },
+  { id: "leech_edge", name: "Leech", max: 8, unit: "%", tag: "weapon", gear: (n) => `Heal for ${n}% of the damage you deal.` },
+  { id: "armor_crack", name: "Armor Crack", max: 80, unit: "flat", tag: "weapon", gear: (n) => `Ranged hits ignore ${n} armor.` },
+  { id: "plating", name: "Plating", max: 160, unit: "flat", tag: "armor", gear: (n) => `+${n} armor.` },
+  { id: "vitality", name: "Vitality", max: 280, unit: "flat", tag: "armor", gear: (n) => `+${n} maximum health.` },
+  { id: "thorns", name: "Thorns", max: 10, unit: "%", tag: "armor", gear: (n) => `Return ${n}% of damage taken to the nearest foe. All Thorns together cannot return more than 35%.` },
+  { id: "potion_sip", name: "Deep Sip", max: 16, unit: "%", tag: "relic", gear: (n) => `Potions restore ${n}% more health.` },
+  { id: "swift_step", name: "Swift Step", max: 12, unit: "%", gear: (n) => `+${n}% movement speed. All Swift Step together cannot rise above 45%.` },
+  { id: "focus", name: "Focus", max: 12, unit: "%", tag: "relic", gear: (n) => `Spell cooldowns are ${n}% shorter. All Focus together cannot shorten spells by more than 35%.` },
+  { id: "fortune", name: "Fortune", max: 24, unit: "%", tag: "relic", gear: (n) => `+${(n / 2).toFixed(1)}% gear drop chance, stacking with Loot Find (Fortune ${n} ÷ 200).` },
 ];
 
-export const ENCHANT_BY_ID = Object.fromEntries(ENCHANTS.map((e) => [e.id, e]));
+export const ENCHANT_BY_ID: Record<string, EnchantDef> = Object.fromEntries(ENCHANTS.map((e) => [e.id, e]));
+
+export function enchantText(roll: { id: string; power: number }): string {
+  const def = ENCHANT_BY_ID[roll.id];
+  if (!def) return roll.id;
+  return def.gear(roll.power);
+}
+
+export function perkText(def: EnchantDef, power: number): string {
+  const perk = def.perk;
+  if (!perk) return def.gear(power);
+  const now = Math.max(0, Math.min(perk.max, Math.floor(power)));
+  const next = Math.min(perk.max, now + perk.step);
+  const cap = now >= perk.max ? ` Maxed at ${perk.max}.` : ` Next point raises it by ${perk.step}, to ${next}/${perk.max}.`;
+  return `Each point adds ${perk.each}. You have ${now}/${perk.max}.${cap} Kept on the account through death, a new witch, and Hardcore. Stacks with ${def.name} on gear.`;
+}
 
 export const QUALITIES: { id: QualityId; name: string; mult: number }[] = [
   { id: "worn", name: "Worn", mult: 0.65 },
@@ -659,7 +709,7 @@ export function nextUid(): string {
 
 function rollQuality(rng: Rng, level: number, luck: number, floor: QualityId | null): (typeof QUALITIES)[number] {
   if (floor) return QUALITIES.find((q) => q.id === floor) ?? QUALITIES[1]!;
-  const boost = level / 40 + luck / 100;
+  const boost = Math.min(1.8, level / 180) + luck / 100;
   const roll = rng() * (1 + boost * 0.35);
   if (roll > 1.22) return QUALITIES[5]!;
   if (roll > 1.05) return QUALITIES[4]!;
@@ -694,14 +744,15 @@ export function rollGear(
     style = set.style;
     title = set.name;
   }
-  const enchants: EnchantRoll[] = [];
+  const enchants = rollEnchants(rng, slot, opts.level, quality.id, opts.luck ?? 0);
+  const level = stretchGearLevel(opts.level, quality.id, opts.luck ?? 0);
   const gear: Gear = {
     uid: nextUid(),
     slot,
     setId,
     style,
     name: slot === "weapon" ? `${quality.name} ${TYPES[type].name} ${title}` : `${quality.name} ${TYPES[type].name} ${title} ${SLOT_NOUN[slot]}`,
-    level: opts.level,
+    level,
     quality: quality.id,
     type,
     enchants,
@@ -713,30 +764,106 @@ export function rollGear(
   return gear;
 }
 
+const RARITY_ENCHANTS: Record<QualityId, number> = {
+  worn: 0,
+  common: 1,
+  fine: 2,
+  rare: 4,
+  epic: 6,
+  legendary: 8,
+};
+
+export function clampGearLevel(level: number): number {
+  return Math.max(1, Math.min(MAX_GEAR_LEVEL, Math.floor(level || 1)));
+}
+
+/** Rarity stretches a drop toward the 1–1000 gear band. A level-400 legendary can reach 1000. */
+export function stretchGearLevel(sourceLevel: number, quality: QualityId, luck = 0): number {
+  const q = Math.max(0, QUALITIES.findIndex((x) => x.id === quality));
+  const stretch = 1 + (q / 5) * 1.35;
+  const luckBump = Math.min(40, Math.floor(Math.max(0, luck) / 10));
+  return clampGearLevel(Math.round(Math.max(1, sourceLevel) * stretch) + luckBump);
+}
+
+/** Level contributes 0–12. Rarity contributes 0–8. Together they fill 0–20, with a little jitter. */
+export function enchantCountFor(rng: Rng, level: number, quality: QualityId): number {
+  const lv = clampGearLevel(level);
+  const fromLevel = Math.floor(((lv - 1) / (MAX_GEAR_LEVEL - 1)) * 12);
+  const jitter = rng() < 0.4 ? -1 : rng() < 0.55 ? 0 : 1;
+  return Math.max(0, Math.min(MAX_GEAR_ENCHANTS, fromLevel + (RARITY_ENCHANTS[quality] ?? 0) + jitter));
+}
+
+export function rollEnchantPower(rng: Rng, def: EnchantDef, level: number, qualityIndex: number): number {
+  if (def.max <= 1) return 1;
+  const t = (clampGearLevel(level) - 1) / (MAX_GEAR_LEVEL - 1);
+  const q = Math.max(0, qualityIndex) / 5;
+  const portion = def.unit === "flat" ? 0.025 + t * t * 0.84 + q * 0.1 : 0.16 + t * 0.58 + q * 0.2;
+  const variance = 0.88 + rng() * 0.24;
+  return Math.max(1, Math.min(def.max, Math.round(def.max * Math.min(1, portion * variance))));
+}
+
+function rollEnchants(rng: Rng, slot: Slot, sourceLevel: number, quality: QualityId, luck: number): EnchantRoll[] {
+  const level = stretchGearLevel(sourceLevel, quality, luck);
+  const n = enchantCountFor(rng, level, quality);
+  const qIndex = Math.max(0, QUALITIES.findIndex((x) => x.id === quality));
+  const prefer = slot === "weapon" ? "weapon" : slot === "relic" ? "relic" : "armor";
+  const front = ENCHANTS.filter((e) => !e.tag || e.tag === prefer);
+  const back = ENCHANTS.filter((e) => e.tag && e.tag !== prefer);
+  const bag = [...front, ...back];
+  const picked: EnchantRoll[] = [];
+  const used = new Set<string>();
+  let guard = 0;
+  while (picked.length < n && bag.length && guard < 80) {
+    guard += 1;
+    const span = picked.length < Math.ceil(n * 0.75) ? Math.max(1, Math.ceil(bag.length * 0.7)) : bag.length;
+    const i = irand(rng, Math.min(bag.length, span));
+    const def = bag.splice(i, 1)[0];
+    if (!def || used.has(def.id)) continue;
+    used.add(def.id);
+    picked.push({ id: def.id, power: rollEnchantPower(rng, def, level, qIndex) });
+  }
+  return picked;
+}
+
 export function gearPrice(g: Gear): number {
   const q = QUALITIES.findIndex((x) => x.id === g.quality) + 1;
   const ep = g.enchants.reduce((s, e) => s + e.power * 8, 0);
   return Math.max(12, Math.floor(20 + g.level * 6 * q + ep));
 }
 
-/** Keep old rolls for migration recovery while switching to fixed equipment stats. */
+/** Restore enchantments that an older build stripped, and keep them on the piece. */
 export function migrateEquipment(g: Gear): void {
-  if (!g.previousEquipment && (g.moves?.length || g.enchants?.length)) {
-    g.previousEquipment = { moves: [...g.moves ?? []], enchants: (g.enchants ?? []).map(e => ({ ...e })) };
+  if (!Array.isArray(g.enchants)) g.enchants = [];
+  if (g.enchants.length === 0 && g.previousEquipment?.enchants?.length) {
+    g.enchants = g.previousEquipment.enchants
+      .filter((e) => e && ENCHANT_BY_ID[e.id] && e.power > 0)
+      .map((e) => ({ id: e.id, power: Math.max(1, Math.floor(e.power)) }))
+      .slice(0, MAX_GEAR_ENCHANTS);
   }
+  g.enchants = g.enchants.filter((e) => e && ENCHANT_BY_ID[e.id] && e.power > 0).slice(0, MAX_GEAR_ENCHANTS);
   g.moves = [];
-  g.enchants = [];
+  g.level = clampGearLevel(g.level || 1);
 }
 
-/** Fixed equipment stats: identical slot, level and quality give identical stats. */
+/** Weapon damage and armor from level (1–1000), quality, and flat enchantments. */
 export function equipmentStats(g: Gear): { damage: number; armor: number } {
   const q = Math.max(0, QUALITIES.findIndex(x => x.id === g.quality));
-  const level = Math.max(1, Math.min(100, Math.floor(g.level || 1)));
-  return { damage: g.slot === "weapon" ? 8 + level * 2 + q * 4 : 0, armor: ["head", "chest", "legs", "feet"].includes(g.slot) ? 8 + level * 2 + q * 5 : g.slot === "relic" ? 3 + level : 0 };
+  const level = clampGearLevel(g.level || 1);
+  let whet = 0;
+  let plate = 0;
+  for (const e of g.enchants ?? []) {
+    if (e.id === "whetstone") whet += e.power;
+    if (e.id === "plating") plate += e.power;
+  }
+  return {
+    damage: g.slot === "weapon" ? 8 + level * 2 + q * 6 + whet : 0,
+    armor: ["head", "chest", "legs", "feet"].includes(g.slot) ? 8 + level * 2 + q * 5 + plate : g.slot === "relic" ? 3 + Math.floor(level * 0.5) + plate : 0,
+  };
 }
 export function gearScore(g: Gear): number {
   const stats = equipmentStats(g);
-  return stats.damage * 4 + stats.armor * 3;
+  const enchant = (g.enchants ?? []).reduce((s, e) => s + e.power + 12, 0);
+  return stats.damage * 4 + stats.armor * 3 + enchant;
 }
 
 export function qualityName(id: QualityId): string {
@@ -846,35 +973,46 @@ export const SKILLS = [
 export type SkillId = (typeof SKILLS)[number]["id"];
 
 export function skillNeed(level: number): number {
-  return Math.max(20, Math.floor(40 * Math.pow(1.14, Math.min(level - 1, 40)) * (1 + (level - 1) * 0.02)));
+  const lv = Math.max(1, Math.min(MAX_SKILL_LEVEL, level));
+  const early = 40 * Math.pow(1.12, Math.min(lv - 1, 30));
+  const tail = 1 + Math.max(0, lv - 30) * 0.035;
+  return Math.max(20, Math.floor(early * tail));
+}
+
+export function xpNeed(level: number): number {
+  const lv = Math.max(1, Math.min(MAX_CHARACTER_LEVEL, level));
+  const early = 30 * Math.pow(1.17, Math.min(lv - 1, 20));
+  const tail = 1 + Math.max(0, lv - 20) * 0.055;
+  return Math.max(20, Math.floor(early * tail));
 }
 
 export function skillLine(id: SkillId, level: number): string {
-  const n = Math.max(0, level - 1);
+  const lv = Math.max(1, Math.min(MAX_SKILL_LEVEL, Math.floor(level || 1)));
+  const n = lv - 1;
   switch (id) {
     case "mining":
     case "woodcutting":
-      return `+${(n * 0.35).toFixed(1)}% yield`;
+      return `+${(n * 0.3).toFixed(1)}% materials from each node. 0.3% per level, no cap, up to level 400.`;
     case "hunting":
-      return `+${Math.min(40, n * 0.4).toFixed(1)}% wild damage`;
+      return `+${(n * 0.2).toFixed(1)}% damage against wild foes. 0.2% per level, no cap.`;
     case "catching":
-      return `+${Math.min(25, n * 0.2).toFixed(1)}% jars`;
+      return `+${(n * 0.12).toFixed(1)}% chance a fallen foe stays as a spirit. 0.12% per level.`;
     case "trading":
-      return `${Math.min(40, n * 0.25).toFixed(1)}% keener prices`;
+      return `Sell prices +${(n * 0.2).toFixed(1)}%. Shops charge ${Math.max(50, 100 - n * 0.125).toFixed(1)}% of the list price. 0.2% sell and 0.125% off per level. Shops never go below 50%.`;
     case "fishing":
-      return `+${Math.min(80, n * 0.8).toFixed(0)}% bite speed`;
+      return `Bites come ${Math.min(70, n * 0.175).toFixed(1)}% sooner. 0.175% per level, cap 70%.`;
     case "social":
-      return `+${Math.floor(n / 8)} story favor`;
+      return `Quest kyo +${(n * 0.15).toFixed(1)}%. 0.15% per level.`;
     case "shroom":
-      return `+${Math.min(40, n * 0.4).toFixed(1)}% patches`;
+      return `${Math.min(80, n * 0.2).toFixed(1)}% chance a patch drops one extra reagent. 0.2% per level, cap 80%.`;
     case "alchemy":
-      return `+${Math.min(35, n * 0.3).toFixed(1)}% brew`;
+      return `${Math.min(50, n * 0.125).toFixed(1)}% chance to brew a second dose. 0.125% per level, cap 50%.`;
     case "adventuring":
-      return `+${(n * 0.15).toFixed(1)} spirit / s`;
+      return `Out of combat, restore ${(1.2 + lv * 0.15).toFixed(1)} health per second. The formula is 1.2 + level × 0.15.`;
     case "physical":
-      return `+${(n * 2).toFixed(0)}% physical weapons`;
+      return `+${(n * 2).toFixed(0)}% damage with physical weapons. 2% per level, no cap.`;
     case "magic":
-      return `+${(n * 2.5).toFixed(0)}% spells, −${Math.min(45, n * 1.2).toFixed(0)}% spell cooldown`;
+      return `+${(n * 2.5).toFixed(0)}% spell damage, and spell cooldowns are ${Math.min(45, n * 0.113).toFixed(1)}% shorter. Damage is 2.5% per level. Cooldown reduction is 0.113% per level and stops at 45%.`;
     default:
       return "";
   }
