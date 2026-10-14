@@ -3861,10 +3861,27 @@ export class TurbzGame {
 			roomCode: code.toUpperCase(),
 			net: "Seeking the veil..."
 		});
-		this.room = new P2PRoom({
+		const opened: P2PRoom = new P2PRoom({
 			room,
 			selfId: this.selfId,
 			name: this.save?.name ?? "Huntress",
+			role: role === "host" ? "host" : "guest",
+			onRejected: (reason) => {
+				if (this.room !== opened) return;
+				this.room = null;
+				this.role = "solo";
+				this.peers = [];
+				this.remotes.clear();
+				publish({ roomCode: "", net: "", peers: [] });
+				this.say(
+					reason === "no-lobby"
+						? "No lobby with that code. The host has to create it first."
+						: reason === "full"
+							? "That lobby is full (3 witches max)."
+							: "Someone is already hosting that code. Pick another."
+				);
+				this.syncHud(true);
+			},
 			onPeersChanged: (peers) => {
 				this.peers = peers.map((p) => ({
 					id: p.id,
@@ -3891,7 +3908,8 @@ export class TurbzGame {
 			},
 			onMessage: (from, data) => this.onNet(from, data)
 		});
-		this.room.join();
+		this.room = opened;
+		opened.join();
 	}
 	onNet(from, data) {
 		const msg = data;

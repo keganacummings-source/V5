@@ -52,7 +52,16 @@ export interface P2PRoomOptions {
   onMessage?: (from: string, data: unknown, channel: "state" | "reliable") => void;
   /** Fires once, on the first successful signaling poll (registration). */
   onConnected?: () => void;
+  /**
+   * Lobbies are player-hosted: the host opens a code, guests can only join a code
+   * that has a live host. Defaults to "guest".
+   */
+  role?: "host" | "guest";
+  /** Fires once if the server refuses the join on the very first poll. */
+  onRejected?: (reason: LobbyRejection) => void;
 }
+
+export type LobbyRejection = "no-lobby" | "full" | "taken";
 
 interface PeerSlot {
   pc: RTCPeerConnection;
@@ -146,6 +155,14 @@ export class P2PRoom {
     }).catch(() => {});
   }
 
+  /** The server refused the join: stop quietly (we never registered, so no leave). */
+  private reject(reason: LobbyRejection): void {
+    this.closed = true;
+    if (this.pollTimer) clearTimeout(this.pollTimer);
+    if (this.pingTimer) clearInterval(this.pingTimer);
+    this.opts.onRejected?.(reason);
+  }
+
   /** Send on the unreliable game-state channel (drops stale packets). */
   broadcast(data: unknown): void {
     const wire = JSON.stringify({ t: "d", d: data });
@@ -191,10 +208,21 @@ export class P2PRoom {
       peer: this.opts.selfId,
       name: this.opts.name ?? "",
       since: String(this.cursor),
+      role: this.opts.role ?? "guest",
     });
     const res = await fetch(`/api/rtc?${params}`);
     if (this.closed) return;
-    if (!res.ok) throw new Error(`signaling poll failed: ${res.status}`);
+    if (!res.ok) {
+      // Only the very first poll can be a refusal; later errors are transient.
+      if (!this.everPolled && (res.status === 404 || res.status === 409)) {
+        const err = ((await res.json().catch(() => null)) as { error?: string } | null)?.error;
+        if (err === "no-lobby" || err === "full" || err === "taken") {
+          this.reject(err);
+          return;
+        }
+      }
+      throw new Error(`signaling poll failed: ${res.status}`);
+    }
     const body = (await res.json()) as RtcPollResponse;
     if (this.closed) return;
     if (!this.everPolled) {

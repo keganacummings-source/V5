@@ -2,9 +2,10 @@ import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "
 import { authClient } from "@/lib/auth/client";
 import { UserButton } from "@/lib/auth/gates";
 import { useCurrentUserState } from "@/lib/auth/use-current-user";
+import { staticSignIn, staticSignUp, useStaticAccount } from "@/lib/auth/static-account";
 import { CLASS_RACE, ITEM_BY_ID, RACES, equipmentStats, type TypeId } from "@/game/content";
 import { CLASSES, classGendered } from "@/game/classes";
-import { CharacterSheet, ClassPicker, LobbyPanel, OpenLobbies, type Pick } from "@/components/character-ui";
+import { CharacterSheet, ClassPicker, LobbyPanel, type Pick } from "@/components/character-ui";
 import { FloatWin, narrow, vh, vw } from "@/components/float-win";
 import { HudActions, Vitals, VerseBar } from "@/components/hud";
 import { isPinned, loadAccountLayout, resetLayout, useLayout } from "@/game/ui-layout";
@@ -16,8 +17,11 @@ import { bestFood } from "@/game/item-use";
 import { CAMP_RECIPE_LIST } from "@/game/survival";
 import { DesignerMode } from "@/components/designer-mode";
 import { ArenaScreen } from "@/components/arena-ui";
-import { Boards, ChatDock, DuelBanner, Hub, Options } from "@/components/hub-ui";
+import { AccountChip, Boards, ChatDock, DuelBanner, Hub, Options } from "@/components/hub-ui";
 import { getSnap, subscribe, TurbzGame } from "@/game/engine";
+
+/** Static (dreamdaw.com) build: accounts + saves live in the worker (see /worker). */
+const LOCAL = import.meta.env.VITE_STATIC_HUNT === "1";
 
 function useSnap() {
   return useSyncExternalStore(subscribe, getSnap, getSnap);
@@ -25,9 +29,9 @@ function useSnap() {
 
 export function TurbzApp() {
   const auth = useCurrentUserState();
-  const local = import.meta.env.VITE_STATIC_HUNT === "1";
-  const user = local ? { id: "local" } : auth.user;
-  const isPending = local ? false : auth.isPending;
+  const acct = useStaticAccount();
+  const user = LOCAL ? acct.user : auth.user;
+  const isPending = LOCAL ? acct.pending : auth.isPending;
   if (isPending) {
     return (
       <main className="game-root grid place-items-center overflow-auto p-3">
@@ -64,7 +68,9 @@ export function ApiGate() {
     setErr("");
     const email = `${name.toLowerCase()}@hunt.turbz`;
     try {
-      if (mode === "up") {
+      if (LOCAL) {
+        await (mode === "up" ? staticSignUp(name, password) : staticSignIn(name, password));
+      } else if (mode === "up") {
         const res = await authClient.signUp.email({ email, password, name });
         if (res.error) throw new Error(res.error.message || "That name is taken");
       } else {
@@ -83,7 +89,7 @@ export function ApiGate() {
       <div className="screen-card px-panel my-auto w-full max-w-md overflow-auto p-4">
         <p className="font-display text-xs text-blood">TURBZ API</p>
         <h1 className="font-display mt-3 text-xl text-bone">Sign in to hunt</h1>
-        <p className="mt-3 text-dim">Username and password only. That account autosaves, and lobby codes meet other TURBZ witches.</p>
+        <p className="mt-3 text-dim">Username and password only. Your witch autosaves to this account, so you can leave and pick up where you stopped.</p>
         <form
           className="mt-4 grid gap-2"
           onSubmit={(e) => {
@@ -134,7 +140,9 @@ function veilName(user: { id: string; displayName?: string | null; primaryEmail?
 
 function Hunt() {
   const auth = useCurrentUserState();
-  const username = auth.user ? veilName(auth.user) : "witch";
+  const acct = useStaticAccount();
+  const who = LOCAL ? acct.user : auth.user;
+  const username = who ? veilName(who) : "witch";
   const snap = useSnap();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const gameRef = useRef<TurbzGame | null>(null);
@@ -307,7 +315,7 @@ function Hunt() {
 
 function makeCode(): string {
   const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-  return Array.from({ length: 4 }, () => alphabet[Math.floor(Math.random() * alphabet.length)]).join("");
+  return Array.from({ length: 6 }, () => alphabet[Math.floor(Math.random() * alphabet.length)]).join("");
 }
 
 function Title(props: {
@@ -355,7 +363,7 @@ function Title(props: {
         {!hard && (
           <div className="mt-5 border-t-2 border-bone pt-4">
             <p className="font-display text-xs text-kyo">Lobby code</p>
-            <p className="text-dim">Same code finds another signed-in witch.</p>
+            <p className="text-dim">Create a lobby and share its code. A lobby only exists while its host is online, and friends need the host's code to join.</p>
             <input
               value={props.code}
               onChange={(e) => props.setCode(e.target.value.toUpperCase().slice(0, 6))}
@@ -372,9 +380,6 @@ function Title(props: {
               <button className="px-btn" data-testid="title-join-btn" onClick={props.onJoin}>
                 Join
               </button>
-            </div>
-            <div className="mt-3">
-              <OpenLobbies onJoin={(c) => { props.setCode(c); props.onJoinCode(c); }} />
             </div>
           </div>
         )}
@@ -500,7 +505,7 @@ function PanelBody({ panel, snap, game }: { panel: string; snap: ReturnType<type
               <button className="px-btn" data-testid="reset-layout-btn" onClick={() => resetLayout()}>
                 Reset window layout
               </button>
-              <UserButton />
+              {LOCAL ? <AccountChip /> : <UserButton />}
               <button className="px-btn" onClick={() => game?.toTitle()}>
                 Return to title
               </button>

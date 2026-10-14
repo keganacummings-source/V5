@@ -228,46 +228,13 @@ export function CharacterSheet({ sheet }: { sheet: Sheet | null }) {
   );
 }
 
-type OpenRoom = { code: string; players: number; names: string };
-
-export function OpenLobbies({ onJoin, disabled }: { onJoin: (code: string) => void; disabled?: boolean }) {
-  const [rooms, setRooms] = useState<OpenRoom[] | null>(null);
-  useEffect(() => {
-    let stop = false;
-    const pull = () =>
-      fetch("/api/rtc?list=1", { cache: "no-store" })
-        .then((r) => (r.ok ? r.json() : { rooms: [] }))
-        .then((d: { rooms?: OpenRoom[] }) => !stop && setRooms(d.rooms ?? []))
-        .catch(() => !stop && setRooms([]));
-    void pull();
-    const id = window.setInterval(pull, 4000);
-    return () => {
-      stop = true;
-      window.clearInterval(id);
-    };
-  }, []);
-  return (
-    <div className="grid gap-1" data-testid="open-lobbies">
-      <p className="font-display text-[9px] text-kyo">OPEN LOBBIES</p>
-      {rooms === null && <p className="text-dim">Looking for lobbies...</p>}
-      {rooms?.length === 0 && <p className="text-dim">No open lobbies right now. Create one!</p>}
-      {rooms?.map((r) => (
-        <button key={r.code} className="px-btn text-left" data-testid={`open-lobby-${r.code}`} disabled={disabled} onClick={() => onJoin(r.code)}>
-          {r.code} · {r.players} player{r.players === 1 ? "" : "s"}
-          <span className="block text-dim">{r.names}</span>
-        </button>
-      ))}
-    </div>
-  );
-}
-
 export function LobbyPanel({ lobby, game, inGame }: { lobby: { code: string; role: string; net: string; members: { id: string; name: string; className: string; level: number; hp: number; max: number; map: string; self: boolean; host: boolean }[] }; game: TurbzGame | null; inGame: boolean }) {
   const [code, setCode] = useState("");
   const [copied, setCopied] = useState(false);
   if (!lobby.code) {
     return (
       <div className="grid gap-2" data-testid="lobby-panel">
-        <p>Play together. Create a lobby and share the code, or enter a friend's code. Everyone signed in with the same code shares one world.</p>
+        <p>Play together. One player hosts: create a lobby and share its code. Friends join with that code, up to 3 witches in all. A lobby only exists while its host is online.</p>
         <input
           value={code}
           onChange={(e) => setCode(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6))}
@@ -280,7 +247,6 @@ export function LobbyPanel({ lobby, game, inGame }: { lobby: { code: string; rol
           <button className="px-btn px-btn-kyo" data-testid="lobby-create-btn" disabled={!inGame} onClick={() => game?.hostLobby(code || makeLobbyCode())}>Create lobby</button>
           <button className="px-btn" data-testid="lobby-join-btn" disabled={!inGame || code.length < 3} onClick={() => game?.joinLobby(code)}>Join</button>
         </div>
-        <OpenLobbies disabled={!inGame} onJoin={(c) => game?.joinLobby(c)} />
       </div>
     );
   }
@@ -316,5 +282,5 @@ export function LobbyPanel({ lobby, game, inGame }: { lobby: { code: string; rol
 
 export function makeLobbyCode(): string {
   const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-  return Array.from({ length: 4 }, () => alphabet[Math.floor(Math.random() * alphabet.length)]).join("");
+  return Array.from({ length: 6 }, () => alphabet[Math.floor(Math.random() * alphabet.length)]).join("");
 }

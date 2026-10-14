@@ -3,24 +3,39 @@
  *
  *  - Static game files are served by Workers Static Assets *without* invoking this
  *    script (see `run_worker_first` in wrangler.toml), so asset traffic is free.
- *  - `/api/rtc` is the WebRTC signaling relay the multiplayer lobby polls. It is
- *    the same wire contract as src/lib/multiplayer/signaling.server.ts, backed by
- *    one Durable Object per room instead of Postgres.
+ *  - /api/account/* + /api/save: username/password accounts and one cloud save
+ *    per account, each account being its own SQLite-backed Durable Object.
+ *  - /api/rtc: WebRTC signaling for player-hosted lobbies (same wire contract as
+ *    src/lib/multiplayer/signaling.server.ts, plus a host/guest role).
  */
 import type { Env } from "./env.ts";
-import { parsePoll, parsePost, MAX_BODY_BYTES } from "./validate.ts";
+import {
+  MAX_ACCOUNT_BODY_BYTES,
+  MAX_BODY_BYTES,
+  MAX_SAVE_BODY_BYTES,
+  parseCredentials,
+  parsePoll,
+  parsePost,
+  parseSave,
+  parseSessionCookie,
+} from "./validate.ts";
+import { MAX_SAVE_BYTES } from "./account-store.ts";
+import { isJoinError } from "./signaling-core.ts";
 
 export { SignalingRoom } from "./room.ts";
-export { LobbyRegistry } from "./registry.ts";
+export { UserAccount } from "./account.ts";
 
-function json(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "content-type": "application/json", "cache-control": "no-store" },
-  });
+const COOKIE = "turbz_session";
+const COOKIE_MAX_AGE = 30 * 24 * 60 * 60;
+
+function json(body: unknown, status = 200, headers?: HeadersInit): Response {
+  const h = new Headers(headers);
+  h.set("content-type", "application/json");
+  h.set("cache-control", "no-store");
+  return new Response(JSON.stringify(body), { status, headers: h });
 }
 
-/** Browsers always send Origin on cross-site POSTs; reject ones that aren't ours. */
+/** Browsers always send Origin on cross-site writes; reject ones that aren't ours. */
 function crossOrigin(request: Request, url: URL): boolean {
   const origin = request.headers.get("origin");
   if (!origin) return false;
@@ -31,38 +46,41 @@ function crossOrigin(request: Request, url: URL): boolean {
   }
 }
 
+/** Read a bounded JSON body. Returns a Response on failure. */
+async function readJson(request: Request, limit: number): Promise<unknown | Response> {
+  const declared = Number(request.headers.get("content-length") ?? 0);
+  if (declared > limit) return json({ error: "payload too large" }, 413);
+  const text = await request.text();
+  if (text.length > limit) return json({ error: "payload too large" }, 413);
+  try {
+    return JSON.parse(text);
+  } catch {
+    return json({ error: "invalid JSON" }, 400);
+  }
+}
+
+// ── signaling ───────────────────────────────────────────────────────────────
+
 async function handleRtc(request: Request, env: Env, url: URL): Promise<Response> {
   try {
     if (request.method === "GET") {
-      if (url.searchParams.get("list") === "1") {
-        const rooms = await env.REGISTRY.get(env.REGISTRY.idFromName("global")).list();
-        return json({ rooms });
-      }
       const q = parsePoll(url.searchParams);
       if (!q) return json({ error: "invalid query" }, 400);
       const stub = env.ROOMS.get(env.ROOMS.idFromName(q.room));
-      const result = await stub.poll(q.room, q.peer, q.name, q.since);
-      if (!result) return json({ error: "room full" }, 409);
+      const result = await stub.poll(q.peer, q.name, q.since, q.role);
+      if (isJoinError(result)) return json({ error: result.error }, result.error === "no-lobby" ? 404 : 409);
       return json(result);
     }
 
     if (request.method === "POST") {
       if (crossOrigin(request, url)) return json({ error: "forbidden" }, 403);
-      const declared = Number(request.headers.get("content-length") ?? 0);
-      if (declared > MAX_BODY_BYTES) return json({ error: "payload too large" }, 413);
-      const text = await request.text();
-      if (text.length > MAX_BODY_BYTES) return json({ error: "payload too large" }, 413);
-      let raw: unknown;
-      try {
-        raw = JSON.parse(text);
-      } catch {
-        return json({ error: "invalid JSON" }, 400);
-      }
+      const raw = await readJson(request, MAX_BODY_BYTES);
+      if (raw instanceof Response) return raw;
       const msg = parsePost(raw);
       if (!msg) return json({ error: "invalid request" }, 400);
       const stub = env.ROOMS.get(env.ROOMS.idFromName(msg.room));
-      if (msg.op === "signal") await stub.signal(msg.room, msg.from, msg.to, msg.kind, msg.payload);
-      else await stub.leave(msg.room, msg.peer);
+      if (msg.op === "signal") await stub.signal(msg.from, msg.to, msg.kind, msg.payload);
+      else await stub.leave(msg.peer);
       return json({ ok: true });
     }
 
@@ -73,10 +91,118 @@ async function handleRtc(request: Request, env: Env, url: URL): Promise<Response
   }
 }
 
+// ── accounts + saves ────────────────────────────────────────────────────────
+
+function sessionCookie(user: string, token: string, url: URL): string {
+  const secure = url.protocol === "https:" ? "; Secure" : "";
+  return `${COOKIE}=${user}.${token}; Path=/; Max-Age=${COOKIE_MAX_AGE}; HttpOnly; SameSite=Lax${secure}`;
+}
+
+function clearCookie(url: URL): string {
+  const secure = url.protocol === "https:" ? "; Secure" : "";
+  return `${COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax${secure}`;
+}
+
+function accountStub(env: Env, user: string) {
+  return env.ACCOUNTS.get(env.ACCOUNTS.idFromName(user));
+}
+
+/** The signed-in user for this request, or null. */
+async function currentUser(request: Request, env: Env) {
+  const s = parseSessionCookie(request.headers.get("cookie"));
+  if (!s) return null;
+  const who = await accountStub(env, s.user).verify(s.token);
+  return who ? { id: s.user, displayName: who.display, token: s.token } : null;
+}
+
+async function handleAccount(request: Request, env: Env, url: URL): Promise<Response> {
+  const route = url.pathname.slice("/api/account/".length);
+  try {
+    if (route === "me" && request.method === "GET") {
+      const me = await currentUser(request, env);
+      return json({ user: me ? { id: me.id, displayName: me.displayName } : null });
+    }
+
+    if (request.method !== "POST") return json({ error: "method not allowed" }, 405);
+    if (crossOrigin(request, url)) return json({ error: "forbidden" }, 403);
+
+    if (route === "signout") {
+      const s = parseSessionCookie(request.headers.get("cookie"));
+      if (s) await accountStub(env, s.user).signout(s.token);
+      return json({ ok: true }, 200, { "set-cookie": clearCookie(url) });
+    }
+
+    if (route === "signup" || route === "signin") {
+      const raw = await readJson(request, MAX_ACCOUNT_BODY_BYTES);
+      if (raw instanceof Response) return raw;
+      const creds = parseCredentials(raw);
+      if ("error" in creds) return json({ error: creds.error }, 400);
+      const key = creds.username.toLowerCase();
+      const stub = accountStub(env, key);
+
+      if (route === "signup") {
+        const res = await stub.signup(creds.username, creds.password);
+        if (!res.ok) return json({ error: "That name is taken." }, 409);
+        return json({ user: { id: key, displayName: res.display } }, 200, {
+          "set-cookie": sessionCookie(key, res.token, url),
+        });
+      }
+
+      const res = await stub.signin(creds.password);
+      if (!res.ok) {
+        if (res.error === "locked") {
+          return json({ error: `Too many tries. Wait ${res.retryAfter}s and try again.` }, 429, {
+            "retry-after": String(res.retryAfter),
+          });
+        }
+        return json({ error: "Wrong name or password." }, 401);
+      }
+      return json({ user: { id: key, displayName: res.display } }, 200, {
+        "set-cookie": sessionCookie(key, res.token, url),
+      });
+    }
+
+    return json({ error: "not found" }, 404);
+  } catch (error) {
+    console.error("[account] error:", error);
+    return json({ error: "Account service failed. Try again." }, 500);
+  }
+}
+
+async function handleSave(request: Request, env: Env, url: URL): Promise<Response> {
+  try {
+    const me = await currentUser(request, env);
+    if (!me) return json({ error: "sign in required" }, 401);
+    const stub = accountStub(env, me.id);
+
+    if (request.method === "GET") {
+      const save = await stub.getSave();
+      return json({ payload: save?.payload ?? null, updatedAt: save?.updatedAt ?? null });
+    }
+
+    if (request.method === "PUT") {
+      if (crossOrigin(request, url)) return json({ error: "forbidden" }, 403);
+      const raw = await readJson(request, MAX_SAVE_BODY_BYTES);
+      if (raw instanceof Response) return raw;
+      const payload = parseSave(raw, MAX_SAVE_BYTES);
+      if (!payload) return json({ error: "bad save" }, 400);
+      await stub.putSave(payload);
+      return json({ ok: true });
+    }
+
+    return json({ error: "method not allowed" }, 405);
+  } catch (error) {
+    console.error("[save] error:", error);
+    return json({ error: "Save failed. Try again." }, 500);
+  }
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/api/rtc") return handleRtc(request, env, url);
+    if (url.pathname.startsWith("/api/account/")) return handleAccount(request, env, url);
+    if (url.pathname === "/api/save") return handleSave(request, env, url);
     if (url.pathname.startsWith("/api/")) return json({ error: "not found" }, 404);
     // Normally unreachable (assets are served before the worker runs), but keeps
     // `wrangler dev` and any future run_worker_first change working.

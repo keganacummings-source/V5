@@ -1,17 +1,22 @@
 /**
  * Pure, runtime-agnostic signaling state for one WebRTC room.
  *
- * This mirrors the Postgres-backed relay in src/lib/multiplayer/signaling.server.ts
- * (roster + SDP/ICE mailbox with TTLs) but lives in memory, because every row
- * is ephemeral (30s / 60s TTL). No Cloudflare imports here so it can be unit
- * tested with plain `node --test`.
+ * Lobbies are player-hosted: a room only exists while its host is polling.
+ * Guests can only join a room that currently has a live host, so nobody can
+ * conjure a server-side lobby by typing a code, and there is no public list.
+ *
+ * Everything is ephemeral (30s / 60s TTL), so it lives in memory. No
+ * Cloudflare imports here so it can be unit tested with plain `node --test`.
  */
 
 export type SignalKind = "offer" | "answer" | "ice";
+export type Role = "host" | "guest";
+export type JoinError = "full" | "no-lobby" | "taken";
 
 export const PEER_TTL_MS = 30_000;
 export const SIGNAL_TTL_MS = 60_000;
-export const MAX_PEERS = 32;
+/** Hard cap: a lobby never holds more than 3 players (host included). */
+export const MAX_PEERS = 3;
 export const MAX_SIGNALS_PER_PEER = 200;
 export const MAX_SIGNALS_PER_ROOM = 2_000;
 export const MAX_NAME_LENGTH = 64;
@@ -31,6 +36,10 @@ export interface SignalRow {
 export interface PollResult {
   peers: PeerRow[];
   signals: SignalRow[];
+}
+
+export function isJoinError(r: PollResult | { error: JoinError }): r is { error: JoinError } {
+  return "error" in r;
 }
 
 interface PeerEntry {
@@ -53,6 +62,7 @@ export function cleanName(name: string): string {
 export class RoomState {
   private peers = new Map<string, PeerEntry>();
   private signals: SignalEntry[] = [];
+  private hostId: string | null = null;
   private lastId = 0;
 
   /**
@@ -69,14 +79,32 @@ export class RoomState {
     for (const [id, p] of this.peers) {
       if (now - p.lastSeen > PEER_TTL_MS) this.peers.delete(id);
     }
+    if (this.hostId && !this.peers.has(this.hostId)) this.hostId = null;
     this.signals = this.signals.filter((s) => now - s.createdAt <= SIGNAL_TTL_MS);
   }
 
-  /** Register/refresh a peer and return its roster + pending signals. null = room full. */
-  poll(peer: string, name: string, since: number, now: number): PollResult | null {
+  /**
+   * Register/refresh a peer and return its roster + pending signals.
+   *  - host:  opens the lobby (or keeps it open). "taken" if another live host owns the code.
+   *  - guest: only allowed while the lobby has a live host. "no-lobby" otherwise.
+   *  - "full" when MAX_PEERS players are already in.
+   */
+  poll(
+    peer: string,
+    name: string,
+    since: number,
+    role: Role,
+    now: number,
+  ): PollResult | { error: JoinError } {
     this.prune(now);
-    if (!this.peers.has(peer) && this.peers.size >= MAX_PEERS) return null;
+    if (role === "host") {
+      if (this.hostId && this.hostId !== peer) return { error: "taken" };
+    } else if (!this.hostId) {
+      return { error: "no-lobby" };
+    }
+    if (!this.peers.has(peer) && this.peers.size >= MAX_PEERS) return { error: "full" };
     this.peers.set(peer, { id: peer, name: cleanName(name), lastSeen: now });
+    if (role === "host") this.hostId = peer;
     const signals: SignalRow[] = [];
     for (const s of this.signals) {
       if (s.to !== peer || s.id <= since) continue;
@@ -101,8 +129,10 @@ export class RoomState {
     this.signals.push({ id: this.nextId(now), from, to, kind, payload, createdAt: now });
   }
 
+  /** Leaving as host closes the lobby to newcomers; players already linked keep playing. */
   leave(peer: string): void {
     this.peers.delete(peer);
+    if (this.hostId === peer) this.hostId = null;
     this.signals = this.signals.filter((s) => s.to !== peer);
   }
 
@@ -115,14 +145,8 @@ export class RoomState {
     return rows.slice(0, MAX_PEERS);
   }
 
-  /** Lobby-list summary: player count and comma-joined names ordered by peer id. */
-  summary(now: number): { players: number; names: string } {
-    const rows = this.roster(now);
-    return { players: rows.length, names: rows.map((r) => r.name).join(", ") };
-  }
-
-  isEmpty(now: number): boolean {
+  hasHost(now: number): boolean {
     this.prune(now);
-    return this.peers.size === 0;
+    return this.hostId !== null;
   }
 }

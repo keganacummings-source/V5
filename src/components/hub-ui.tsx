@@ -1,7 +1,11 @@
 import { useEffect, useState } from "react";
 import { UserButton } from "@/lib/auth/gates";
+import { staticSignOut, useStaticAccount } from "@/lib/auth/static-account";
 import { answerFriend, ensureProfile, listChat, listFriends, listGraves, postChat, requestFriend } from "@/game/social-client";
 import type { ChatLine, FriendRow, GraveMode, GraveRow } from "@/game/social-types";
+
+/** Static (dreamdaw.com) build: accounts + saves live in the worker. */
+const LOCAL = import.meta.env.VITE_STATIC_HUNT === "1";
 
 export function ChatDock({ username, playing, bare }: { username: string; playing: boolean; bare?: boolean }) {
   const [open, setOpen] = useState(false);
@@ -100,6 +104,28 @@ export function ChatDock({ username, playing, bare }: { username: string; playin
   );
 }
 
+/** Static build: who is signed in, plus a sign-out button. */
+export function AccountChip() {
+  const { user } = useStaticAccount();
+  const [busy, setBusy] = useState(false);
+  if (!user) return null;
+  return (
+    <span className="inline-flex items-center gap-2">
+      <span className="text-dim">{user.displayName}</span>
+      <button
+        className="px-btn !min-h-9 !py-1"
+        disabled={busy}
+        onClick={() => {
+          setBusy(true);
+          void staticSignOut().finally(() => setBusy(false));
+        }}
+      >
+        Sign out
+      </button>
+    </span>
+  );
+}
+
 export function Hub(props: {
   username: string;
   onHunt: () => void;
@@ -114,7 +140,9 @@ export function Hub(props: {
       <div className="screen-card px-panel my-auto w-full max-w-xl p-4 sm:p-5">
         <p className="font-display text-xs text-blood">TURBO ENGINE · V3</p>
         <h1 className="font-display mt-3 text-lg text-bone sm:text-2xl">TURBZ</h1>
-        <p className="mt-3 text-dim">Signed in as {props.username}. Pick a veil. The dead keep the score.</p>
+        <p className="mt-3 text-dim">
+          Signed in as {props.username}. Pick a veil. The dead keep the score.
+        </p>
         <div className="mt-5 grid gap-2">
           <button className="px-btn px-btn-kyo" onClick={props.onHunt}>
             TurboHunt
@@ -261,10 +289,11 @@ export function Options({ username, onBack }: { username: string; onBack: () => 
       <div className="px-panel my-auto w-full max-w-xl p-4">
         <p className="font-display text-xs text-blood">OPTIONS</p>
         <h2 className="font-display mt-2 text-sm">The account</h2>
-        <p className="mt-2 text-dim">Signed in as {username}. Saves, graves, and chat hang on this name.</p>
-        <div className="mt-3">
-          <UserButton />
-        </div>
+        <p className="mt-2 text-dim">
+          Signed in as {username}.{" "}
+          {LOCAL ? "Your witch autosaves to this account, so you can pick up where you left off on any device." : "Saves, graves, and chat hang on this name."}
+        </p>
+        <div className="mt-3">{LOCAL ? <AccountChip /> : <UserButton />}</div>
         <div className="mt-5 border-t-2 border-bone pt-4">
           <p className="font-display text-xs text-kyo">Friends</p>
           <p className="text-dim">Ask by the name they signed in with. Accepted friends share the friends channel.</p>
