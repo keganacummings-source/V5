@@ -1,0 +1,343 @@
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { authClient } from "@/lib/auth/client";
+import { UserButton } from "@/lib/auth/gates";
+import { useCurrentUserState } from "@/lib/auth/use-current-user";
+import { staticSignIn, staticSignUp, useStaticAccount } from "@/lib/auth/static-account";
+import { ALCHEMY_RECIPES, CLASS_RACE, ENCHANT_BY_ID, ITEM_BY_ID, RACES, enchantText, equipmentStats, type TypeId } from "@/game/content";
+import { CLASSES, classGendered } from "@/game/classes";
+import { CharacterSheet, ClassPicker, LobbyPanel, type Pick } from "@/components/character-ui";
+import { FloatWin, narrow, vh, vw } from "@/components/float-win";
+import { HudActions, Vitals, VerseBar } from "@/components/hud";
+import { isPinned, loadAccountLayout, resetLayout, useLayout } from "@/game/ui-layout";
+import { loadCloudSave, writeCloudSave } from "@/game/cloud-client";
+import { bindCloud, cloudReady, ingestCloud, noteArena, noteHardcore, noteHunt, readArenaLocal } from "@/game/account-save";
+import { postGrave } from "@/game/social-client";
+import type { GraveBody } from "@/game/social-types";
+import { bestFood } from "@/game/item-use";
+import { CAMP_RECIPE_LIST } from "@/game/survival";
+import { DesignerMode } from "@/components/designer-mode";
+import { ArenaScreen } from "@/components/arena-ui";
+import { AccountChip, Boards, ChatDock, DuelBanner, Hub, Options } from "@/components/hub-ui";
+import { getSnap, subscribe, TurbzGame } from "@/game/engine";
+
+/** Static (dreamdaw.com) build: accounts + saves live in the worker (see /worker). */
+const LOCAL = import.meta.env.VITE_STATIC_HUNT === "1";
+
+function useSnap() {
+  return useSyncExternalStore(subscribe, getSnap, getSnap);
+}
+
+export function TurbzApp() {
+  const auth = useCurrentUserState();
+  const acct = useStaticAccount();
+  const user = LOCAL ? acct.user : auth.user;
+  const isPending = LOCAL ? acct.pending : auth.isPending;
+  if (isPending) {
+    return (
+      <main className="game-root grid place-items-center overflow-auto p-3">
+        <div className="screen-card px-panel my-auto w-full max-w-md overflow-auto p-4">
+          <p className="font-display text-xs text-blood">TURBZ API</p>
+          <h1 className="font-display mt-3 text-xl text-bone">TURBZ</h1>
+          <p className="mt-3 text-dim">Checking your account. Autosave and lobbies wait on the veil.</p>
+        </div>
+      </main>
+    );
+  }
+  if (!user) return <ApiGate />;
+  return <Hunt />;
+}
+
+export function ApiGate() {
+  const [user, setUser] = useState("");
+  const [password, setPassword] = useState("");
+  const [mode, setMode] = useState<"in" | "up">("up");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function submit() {
+    const name = user.trim();
+    if (!/^[a-zA-Z0-9_]{3,16}$/.test(name)) {
+      setErr("Username is 3–16 letters, numbers, or _.");
+      return;
+    }
+    if (password.length < 8) {
+      setErr("Password needs 8 characters.");
+      return;
+    }
+    setBusy(true);
+    setErr("");
+    const email = `${name.toLowerCase()}@hunt.turbz`;
+    try {
+      if (LOCAL) {
+        await (mode === "up" ? staticSignUp(name, password) : staticSignIn(name, password));
+      } else if (mode === "up") {
+        const res = await authClient.signUp.email({ email, password, name });
+        if (res.error) throw new Error(res.error.message || "That name is taken");
+      } else {
+        const res = await authClient.signIn.email({ email, password });
+        if (res.error) throw new Error(res.error.message || "Wrong name or password");
+      }
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "TURBZ API refused that");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <main className="game-root grid place-items-center overflow-auto p-3">
+      <div className="screen-card px-panel my-auto w-full max-w-md overflow-auto p-4">
+        <p className="font-display text-xs text-blood">TURBZ API</p>
+        <h1 className="font-display mt-3 text-xl text-bone">Login</h1>
+        <p className="mt-3 text-dim">Username and password only. Your witch autosaves to this account, so you can leave and pick up where you stopped.</p>
+        <form
+          className="mt-4 grid gap-2"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void submit();
+          }}
+        >
+          <input
+            value={user}
+            onChange={(e) => setUser(e.target.value.slice(0, 16))}
+            required
+            placeholder="Username"
+            aria-label="Username"
+            autoComplete="username"
+            className="w-full border-2 border-bone bg-ink px-3 py-2 text-bone outline-none"
+          />
+          <input
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            type="password"
+            required
+            minLength={8}
+            placeholder="Password"
+            aria-label="Password"
+            autoComplete={mode === "up" ? "new-password" : "current-password"}
+            className="w-full border-2 border-bone bg-ink px-3 py-2 text-bone outline-none"
+          />
+          {err && <p className="text-blood">{err}</p>}
+          <button className="px-btn px-btn-kyo" type="submit" disabled={busy}>
+            {busy ? "Wait" : mode === "up" ? "Sign Up" : "Login"}
+          </button>
+          <button className="px-btn" type="button" onClick={() => setMode(mode === "up" ? "in" : "up")}>
+            {mode === "up" ? "Login" : "Sign Up"}
+          </button>
+        </form>
+      </div>
+    </main>
+  );
+}
+
+function veilName(user: { id: string; displayName?: string | null; primaryEmail?: string | null }): string {
+  const raw = (user.displayName || user.primaryEmail || "witch").split("@")[0] ?? "witch";
+  const cleaned = raw.replace(/[^a-zA-Z0-9_]/g, "").slice(0, 16);
+  if (cleaned.length >= 3) return cleaned;
+  const tail = user.id.replace(/[^a-zA-Z0-9]/g, "").slice(0, 12);
+  return `w${tail}`.slice(0, 16);
+}
+
+function Hunt() {
+  const auth = useCurrentUserState();
+  const acct = useStaticAccount();
+  const who = LOCAL ? acct.user : auth.user;
+  const username = who ? veilName(who) : "witch";
+  const snap = useSnap();
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const gameRef = useRef<TurbzGame | null>(null);
+  const [create, setCreate] = useState(false);
+  const [name, setName] = useState("Mira");
+  const [pick, setPick] = useState<Pick>({ classId: "warden", traitId: null, female: true });
+  const race = CLASS_RACE[pick.classId];
+  const [code, setCode] = useState("");
+  const [intent, setIntent] = useState<"solo" | "host" | "join">("solo");
+  const [chat, setChat] = useState("");
+  const [screen, setScreen] = useState<"hub" | "hunt" | "circle" | "hard" | "boards" | "options" | "designer">("hub");
+  const [arenaSeed, setArenaSeed] = useState<unknown>(null);
+  const [booted, setBooted] = useState(false);
+
+  const onArenaCloud = useCallback((save: unknown | null) => {
+    noteArena(save);
+    setArenaSeed(save);
+  }, []);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const game = new TurbzGame(canvas);
+    gameRef.current = game;
+    game.attachCloud((json) => {
+      try {
+        const parsed = JSON.parse(json) as { slot?: string; save?: unknown };
+        if (parsed && parsed.slot === "hardcore") noteHardcore(parsed.save);
+        else if (parsed && parsed.slot === "hunt") noteHunt(parsed.save);
+        else noteHunt(parsed);
+      } catch {
+        /* keep the local hunt */
+      }
+    });
+    game.attachGrave((body: GraveBody) => {
+      void postGrave(body).catch(() => {});
+    });
+    game.start();
+    void loadAccountLayout();
+    bindCloud((json) => {
+      void writeCloudSave({ data: json }).catch(() => {});
+    });
+    void loadCloudSave()
+      .then((text) => {
+        if (typeof text === "string" && text.length > 2) {
+          try {
+            const split = ingestCloud(JSON.parse(text) as unknown);
+            if (split.hunt && typeof split.hunt === "object") game.rememberCloud(split.hunt);
+            if (split.hardcore && typeof split.hardcore === "object") game.rememberHard(split.hardcore);
+            setArenaSeed(split.arena);
+          } catch {
+            setArenaSeed(readArenaLocal());
+          }
+        } else setArenaSeed(readArenaLocal());
+      })
+      .catch(() => setArenaSeed(readArenaLocal()))
+      .finally(() => {
+        cloudReady();
+        setBooted(true);
+      });
+    return () => game.stop();
+  }, []);
+
+  const g = () => gameRef.current;
+  const joinCode = (c: string) => {
+    if (c.length < 3) return;
+    setCode(c);
+    setIntent("join");
+    if (snap.hasSave) g()?.continueGame({ role: "guest", code: c });
+    else setCreate(true);
+  };
+
+  return (
+    <main className="game-root">
+      <canvas ref={canvasRef} className="game-canvas" aria-label="TURBZ wilds" />
+      <div className="overlay">
+        {!create && screen !== "designer" && !(snap.mode === "play" && screen !== "hub") && <ChatDock username={username} playing={false} />}
+        {!create && snap.mode === "play" && screen !== "hub" && (
+          <FloatWin id="chat" title="Veil chat" compact def={() => ({ x: Math.max(8, vw() - 296), y: 8, w: 288 })}>
+            <ChatDock username={username} playing bare />
+          </FloatWin>
+        )}
+        {screen === "hub" && snap.mode !== "play" && (
+          <Hub
+            username={username}
+            onHunt={() => {
+              g()?.swapRules("hunt");
+              setScreen("hunt");
+            }}
+            onCircle={() => setScreen("circle")}
+            onHard={() => {
+              g()?.swapRules("hardcore");
+              setScreen("hard");
+            }}
+            onBoards={() => setScreen("boards")}
+            onOptions={() => setScreen("options")}
+            onDesigner={() => setScreen("designer")}
+          />
+        )}
+        {(screen === "hunt" || screen === "hard") && snap.mode !== "play" && !create && (
+          <Title
+            kind={screen === "hard" ? "hard" : "hunt"}
+            hasSave={snap.hasSave}
+            code={code}
+            setCode={setCode}
+            onBack={() => setScreen("hub")}
+            onNew={() => {
+              setIntent("solo");
+              setCreate(true);
+            }}
+            onContinue={() => {
+              g()?.continueGame();
+            }}
+            onHost={() => {
+              const c = code.trim() || makeCode();
+              setCode(c);
+              setIntent("host");
+              if (snap.hasSave) g()?.continueGame({ role: "host", code: c });
+              else setCreate(true);
+            }}
+            onJoin={() => joinCode(code.trim())}
+            onJoinCode={joinCode}
+            circleReady={booted}
+            circleMarks={
+              arenaSeed && typeof arenaSeed === "object" && "points" in arenaSeed
+                ? Number((arenaSeed as { points: number }).points)
+                : null
+            }
+            onCircle={() => setScreen("circle")}
+          />
+        )}
+        {(screen === "hunt" || screen === "hard") && snap.mode !== "play" && create && (
+          <Create
+            name={name}
+            setName={setName}
+            pick={pick}
+            setPick={setPick}
+            game={g()}
+            onBack={() => setCreate(false)}
+            onGo={() => {
+              const lobby =
+                intent === "solo"
+                  ? undefined
+                  : { role: intent === "host" ? ("host" as const) : ("guest" as const), code: code.trim() || makeCode() };
+              g()?.begin(name, race, lobby, pick.classId, pick.traitId, classGendered(pick.classId) ? pick.female : true);
+              setCreate(false);
+            }}
+          />
+        )}
+        {snap.mode === "play" && screen !== "circle" && screen !== "boards" && screen !== "options" && (
+          <Play snap={snap} game={g()} chat={chat} setChat={setChat} />
+        )}
+        {screen === "designer" && snap.mode !== "play" && <DesignerMode onBack={() => setScreen("hub")} />}
+        {screen === "circle" && (
+          <ArenaScreen
+            seed={arenaSeed}
+            onClose={() => setScreen("hub")}
+            onCloud={onArenaCloud}
+          />
+        )}
+        {screen === "boards" && snap.mode !== "play" && <Boards onBack={() => setScreen("hub")} />}
+        {screen === "options" && snap.mode !== "play" && <Options username={username} onBack={() => setScreen("hub")} />}
+      </div>
+    </main>
+  );
+}
+
+function makeCode(): string {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  return Array.from({ length: 6 }, () => alphabet[Math.floor(Math.random() * alphabet.length)]).join("");
+}
+
+function Title(props: {
+  kind: "hunt" | "hard";
+  hasSave: boolean;
+  code: string;
+  setCode: (v: string) => void;
+  onBack: () => void;
+  onNew: () => void;
+  onContinue: () => void;
+  onHost: () => void;
+  onJoin: () => void;
+  onJoinCode: (code: string) => void;
+  circleReady: boolean;
+  circleMarks: number | null;
+  onCircle: () => void;
+}) {
+  const hard = props.kind === "hard";
+  return (
+    <div className="flex h-full items-center justify-center overflow-auto p-3 pb-20">
+      <div className="screen-card px-panel my-auto w-full max-w-xl p-4 sm:p-5">
+        <p className="font-display text-xs text-blood">{hard ? "HARDCORE" : "TURBOHUNT"}</p>
+        <h1 className="font-display mt-3 text-lg text-bone sm:text-2xl">{hard ? "The frontier" : "The hunt"}</h1>
+        <p className="mt-3 text-dim">
+          {hard
+            ? "A separate wilderness. Hunger, thirst and sleep drain during active play. Hunt or buy food, chop logs, cook on campfires and purify gathered water. Only healing spells mend lasting wounds. Death takes this body, even in dungeons."
+            : "Die and you must choose a new witch. A finished set of her blood can be worn again. Otherwise you wake in the default robes, at another tavern, beside the bounty board."}
+        </p>
