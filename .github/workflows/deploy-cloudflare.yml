@@ -25,8 +25,12 @@ jobs:
         run: npm run build:static
 
       - name: Deploy to Cloudflare Workers
-        uses: cloudflare/wrangler-action@v3
+        uses: cloudflare/wrangler-action@v4
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          # Wrangler 3 hit /zones/.../workers/routes on every custom-domain deploy.
+          # Tokens without Zone Workers Routes read died with "No access", after the
+          # script had already uploaded. 4.143+ skips that check for custom domains.
+          wranglerVersion: "4.151.0"
           command: deploy

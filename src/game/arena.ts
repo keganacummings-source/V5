@@ -25,8 +25,11 @@ import {
   typeMult,
 } from "./content";
 import { directionFromDelta, type ActorDirection } from "./actor-sheets.config";
+import { CombatFx } from "./combat-fx";
+import { savedMaps, mapToWorld } from "./map-format";
 import type { GraveBody } from "./social-types";
 import { drawActor, drawMonster, drawShadowName } from "./sprites";
+import { drawWorldSlice, type WorldData } from "./world";
 
 const TILE = 32;
 const NAMES = [
@@ -125,24 +128,42 @@ export type ArenaCard = {
   marked: boolean;
 };
 
+export type CircleMode = "classic" | "hunger";
+export type CamMode = "team" | "free";
+export type TeamZone = { tx: number; ty: number; tw: number; th: number };
+export type ArenaTeamSnap = {
+  id: number;
+  name: string;
+  color: string;
+  alive: number;
+  count: number;
+  level: number;
+  intent: string;
+  placed: boolean;
+};
 export type ArenaSnap = {
-  phase: "roster" | "fight" | "result" | "over";
-  points: number;
-  tokens: number;
-  wins: number;
-  losses: number;
-  roster: ArenaCard[];
-  party: number;
+  phase: "setup" | "fight" | "result";
   note: string;
   speed: number;
-  yours: number;
-  theirs: number;
-  last: { win: boolean; tokens: number; note: string } | null;
+  mode: CircleMode;
+  cam: CamMode;
+  mapId: string;
+  mapName: string;
+  maps: { id: string; name: string }[];
+  teamCount: number;
+  perTeam: number;
+  placing: boolean;
+  placeFor: number;
+  focus: number;
+  teams: ArenaTeamSnap[];
+  clock: string;
+  winner: string;
 };
 
 type Fighter = {
   id: string;
-  side: 0 | 1;
+  side: number;
+  xp: number;
   role: "witch" | "summoner" | "spirit";
   name: string;
   race: RaceId | null;
@@ -511,11 +532,20 @@ function route(grid: Uint8Array, w: number, h: number, sx: number, sy: number, g
     [0, 1],
     [0, -1],
   ] as const;
+  const hcost = (i: number) => Math.abs((i % w) - gx) + Math.abs(((i / w) | 0) - gy);
+  let best = start;
+  let bestH = hcost(start);
   let guard = 0;
-  while (guard++ < w * h * 4) {
+  const budget = Math.min(w * h, 7000);
+  while (guard++ < budget) {
     const cur = heap.pop();
     if (!cur) break;
     if (cur.c > dist[cur.i]! + 0.01) continue;
+    const h = hcost(cur.i);
+    if (h < bestH) {
+      bestH = h;
+      best = cur.i;
+    }
     if (cur.i === goal) break;
     const x = cur.i % w;
     const y = (cur.i / w) | 0;
@@ -534,9 +564,10 @@ function route(grid: Uint8Array, w: number, h: number, sx: number, sy: number, g
       }
     }
   }
-  if (prev[goal] === -1 && goal !== start) return [];
+  const end = prev[goal] !== -1 || goal === start ? goal : best;
+  if (end === start) return [{ x: gx * TILE + TILE / 2, y: gy * TILE + TILE / 2 }];
   const raw: { x: number; y: number }[] = [];
-  let c = goal;
+  let c = end;
   let safety = 0;
   while (c !== -1 && safety++ < 800) {
     raw.push({ x: (c % w) * TILE + TILE / 2, y: ((c / w) | 0) * TILE + TILE / 2 });
@@ -584,14 +615,36 @@ function los(grid: Uint8Array, w: number, h: number, x0: number, y0: number, x1:
   return true;
 }
 
+const SQUADS = [
+  { name: "Gold", color: "#e6c15a" },
+  { name: "Crimson", color: "#c4473a" },
+  { name: "Tide", color: "#5ab0e8" },
+  { name: "Moss", color: "#7dcea0" },
+  { name: "Violet", color: "#c9a6e8" },
+  { name: "Ember", color: "#f08a24" },
+  { name: "Rime", color: "#d7ecff" },
+  { name: "Ash", color: "#d2c4b0" },
+] as const;
+
+type Squad = { intent: "hunt" | "train"; until: number; gx: number; gy: number; told: boolean };
+
 export class WitchArena {
   canvas: HTMLCanvasElement;
   ctx: CanvasRenderingContext2D;
-  save: ArenaSave | null = null;
-  phase: ArenaSnap["phase"] = "roster";
-  note = "Six free witches. Mark a coven. The circle does not wait.";
+  phase: ArenaSnap["phase"] = "setup";
+  note = "Pick a map, plant the packs, and let them fight.";
   speed = 1;
-  last: ArenaSnap["last"] = null;
+  mode: CircleMode = "hunger";
+  camMode: CamMode = "team";
+  mapId = "default";
+  mapName = "Default circle";
+  teamCount = 4;
+  perTeam = 3;
+  zones: (TeamZone | null)[] = [];
+  placing = false;
+  placeFor = 0;
+  focus = 0;
+  world: WorldData | null = null;
   fighters: Fighter[] = [];
   grid: Uint8Array<ArrayBufferLike> = new Uint8Array(0);
   gw = 42;
@@ -604,32 +657,41 @@ export class WitchArena {
   wantZ = 0.8;
   floats: Flo[] = [];
   beams: Beam[] = [];
-  gained = 0;
+  cfx = new CombatFx();
+  squads: Squad[] = [];
+  winner = "";
   age = 0;
   clock = 0;
   onCloud: (save: ArenaSave | null) => void = () => {};
   onGrave: (body: GraveBody) => void = () => {};
-  private buriedKeys = new Set<string>();
+  private keys = new Set<string>();
+  private drag: { x: number; y: number; camX: number; camY: number; moved: boolean } | null = null;
   private running = false;
   private raf = 0;
   private lastT = 0;
   private viewW = 800;
   private viewH = 600;
   private dpr = 1;
+  private fitted = false;
+  private pubAt = 0;
   private listeners = new Set<() => void>();
   private snap: ArenaSnap = {
-    phase: "roster",
-    points: 3,
-    tokens: 0,
-    wins: 0,
-    losses: 0,
-    roster: [],
-    party: 0,
+    phase: "setup",
     note: "",
     speed: 1,
-    yours: 6,
-    theirs: 6,
-    last: null,
+    mode: "hunger",
+    cam: "team",
+    mapId: "default",
+    mapName: "Default circle",
+    maps: [],
+    teamCount: 4,
+    perTeam: 3,
+    placing: false,
+    placeFor: 0,
+    focus: 0,
+    teams: [],
+    clock: "0:00",
+    winner: "",
   };
 
   constructor(canvas: HTMLCanvasElement) {
@@ -649,32 +711,41 @@ export class WitchArena {
     return this.snap;
   }
 
-  start(seed: unknown): void {
-    const saved = readArena(seed);
-    if (saved) {
-      this.save = saved;
-      this.phase = "roster";
-      this.note = `${saved.points} marks left. Draw with a token, or send the six.`;
-    } else this.fresh();
+  start(_seed: unknown): void {
     this.running = true;
     this.lastT = performance.now();
+    this.resize();
+    this.loadMap("default");
+    this.note = "Pick a map, or keep the default circle. Then choose the packs.";
+    this.bind();
+    this.publish();
     const loop = (t: number) => {
       if (!this.running) return;
       const dt = Math.min(0.05, (t - this.lastT) / 1000);
       this.lastT = t;
+      if (!this.fitted && this.viewW > 8) {
+        this.resize();
+        if (this.phase !== "fight") this.fitMap();
+        this.fitted = true;
+      }
       if (this.phase === "fight") this.step(dt * this.speed);
       else this.clock += dt;
+      this.driveCam(dt);
       this.draw();
+      this.pubAt -= dt;
+      if (this.phase === "fight" && this.pubAt <= 0) {
+        this.pubAt = 0.45;
+        this.publish();
+      }
       this.raf = requestAnimationFrame(loop);
     };
     this.raf = requestAnimationFrame(loop);
-    this.publish();
-    this.resize();
   }
 
   stop(): void {
     this.running = false;
     cancelAnimationFrame(this.raf);
+    this.unbind();
   }
 
   resize(): void {
@@ -686,125 +757,398 @@ export class WitchArena {
     this.canvas.height = Math.max(1, Math.floor(this.viewH * this.dpr));
   }
 
-  fresh(): void {
-    this.buriedKeys.clear();
-    const rng = mulberry32((Date.now() ^ ((Math.random() * 1e9) | 0)) >>> 0 || 1);
-    const roster = [0, 1, 2, 3, 4, 5].map(() => rollWitch(rng));
-    this.save = {
-      v: 1,
-      points: 3,
-      tokens: 0,
-      wins: 0,
-      losses: 0,
-      roster,
-      party: roster.map((w) => w.uid),
-    };
-    this.phase = "roster";
-    this.last = null;
-    this.note = "The circle gives you six. They may be saints or scraps. Send them.";
-    this.persist();
-  }
-
-  summon(): void {
-    const save = this.save;
-    if (!save || this.phase !== "roster" || save.tokens < 1) return;
-    save.tokens -= 1;
-    const rng = mulberry32((Date.now() ^ ((Math.random() * 1e9) | 0)) >>> 0 || 3);
-    const witch = rollWitch(rng);
-    save.roster.push(witch);
-    this.note = `${witch.name} answers. Lv ${witch.level} ${witch.role}. Power ${powerOf(witch)}.`;
-    this.persist();
-  }
-
-  toggle(uid: string): void {
-    const save = this.save;
-    if (!save || this.phase !== "roster") return;
-    const i = save.party.indexOf(uid);
-    if (i >= 0) save.party.splice(i, 1);
-    else if (save.party.length >= 6) {
-      this.note = "Six already stand. Unmark one.";
-      this.publish();
-      return;
-    } else save.party.push(uid);
-    this.persist();
-  }
-
-  setSpeed(n: number): void {
-    this.speed = n === 2 ? 2 : 1;
+  setMap(id: string): void {
+    this.loadMap(id);
+    this.phase = "setup";
+    this.placing = false;
+    this.fighters = [];
+    this.note = `${this.mapName}. Plant where each pack appears.`;
     this.publish();
   }
 
-  fight(): void {
-    const save = this.save;
-    if (!save || this.phase === "fight" || save.points <= 0) return;
-    const yours = save.party.map((id) => save.roster.find((w) => w.uid === id)).filter((w): w is ArenaWitch => !!w);
-    if (yours.length !== 6) {
-      this.note = "Mark exactly six.";
-      this.publish();
-      return;
+  setTeamCount(n: number): void {
+    this.teamCount = Math.max(2, Math.min(SQUADS.length, Math.round(n) || 2));
+    this.zones = Array.from({ length: this.teamCount }, (_, i) => this.zones[i] ?? null);
+    if (this.placeFor >= this.teamCount) this.placeFor = 0;
+    if (this.focus >= this.teamCount) this.focus = 0;
+    this.publish();
+  }
+
+  setPerTeam(n: number): void {
+    this.perTeam = Math.max(1, Math.min(6, Math.round(n) || 1));
+    this.publish();
+  }
+
+  setMode(mode: CircleMode): void {
+    this.mode = mode;
+    this.note = mode === "hunger"
+      ? "Hunger Games. Packs roam, drill, or hunt. You can follow a team or fly the camera."
+      : "Classic. Packs stay together and hunt until one is left.";
+    this.publish();
+  }
+
+  setSpeed(n: number): void {
+    this.speed = n >= 4 ? 4 : n >= 2 ? 2 : 1;
+    this.publish();
+  }
+
+  setCam(mode: CamMode): void {
+    this.camMode = mode;
+    if (mode === "team") this.frame();
+    this.publish();
+  }
+
+  cycleTeam(dir: number): void {
+    this.focus = (this.focus + dir + this.teamCount) % this.teamCount;
+    this.camMode = "team";
+    this.frame();
+    this.camX = this.wantX;
+    this.camY = this.wantY;
+    this.publish();
+  }
+
+  zoomBy(factor: number): void {
+    this.zoom = Math.max(0.22, Math.min(2.6, this.zoom * factor));
+    if (this.phase === "fight" || this.phase === "result") this.camMode = "free";
+    this.publish();
+  }
+
+  armPlace(): void {
+    if (!this.world) this.loadMap(this.mapId);
+    this.phase = "setup";
+    this.placing = true;
+    this.fighters = [];
+    const empty = this.zones.findIndex((z) => !z);
+    this.placeFor = empty >= 0 ? empty : 0;
+    this.fitMap();
+    this.note = `Click the ground for ${SQUADS[this.placeFor]!.name}. Drag to pan. Scroll or the buttons to zoom.`;
+    this.publish();
+  }
+
+  setPlace(i: number): void {
+    if (i < 0 || i >= this.teamCount) return;
+    this.placeFor = i;
+    this.placing = true;
+    this.phase = "setup";
+    this.note = `Plant ${SQUADS[i]!.name}.`;
+    this.publish();
+  }
+
+  autoZones(): void {
+    if (!this.world) this.loadMap(this.mapId);
+    const n = this.teamCount;
+    for (let i = 0; i < n; i++) {
+      const ang = (i / n) * Math.PI * 2 - Math.PI / 2;
+      const cx = Math.round(this.gw / 2 + Math.cos(ang) * this.gw * 0.32);
+      const cy = Math.round(this.gh / 2 + Math.sin(ang) * this.gh * 0.32);
+      this.zones[i] = this.clampZone(cx, cy);
     }
+    this.note = "Pads scattered around the map. Move any of them, or start.";
+    this.publish();
+  }
+
+  launch(): void {
+    if (!this.world) this.loadMap(this.mapId);
+    this.ensureZones();
     const rng = mulberry32((Date.now() ^ ((Math.random() * 1e9) | 0)) >>> 0 || 9);
-    const avg = yours.reduce((s, w) => s + w.level, 0) / yours.length;
-    const foes = [0, 1, 2, 3, 4, 5].map(() => rollWitch(rng, Math.max(1, Math.round(avg + (rng() * 15 - 6)))));
-    const map = buildMap(rng);
-    this.grid = map.grid;
-    this.gw = map.w;
-    this.gh = map.h;
     this.fighters = [];
     this.floats = [];
     this.beams = [];
-    this.gained = 0;
+    this.cfx = new CombatFx();
     this.age = 0;
-    const ys = [4, 8, 12, 16, 20, 23];
-    yours.forEach((w, i) => this.spawnWitch(w, 0, 2 + (i % 2), ys[i]!, rng));
-    foes.forEach((w, i) => this.spawnWitch(w, 1, map.w - 3 - (i % 2), ys[i]!, rng));
-    this.camX = (map.w * TILE) / 2;
-    this.camY = (map.h * TILE) / 2;
-    this.zoom = 0.72;
+    this.winner = "";
+    this.squads = [];
+    for (let t = 0; t < this.teamCount; t++) {
+      const zone = this.zones[t]!;
+      const spots = this.spotsIn(zone, this.perTeam);
+      this.squads.push({
+        intent: this.mode === "classic" ? "hunt" : "train",
+        until: 3 + Math.random() * 4,
+        gx: (zone.tx + zone.tw / 2) * TILE,
+        gy: (zone.ty + zone.th / 2) * TILE,
+        told: false,
+      });
+      for (let i = 0; i < this.perTeam; i++) {
+        const level = this.mode === "hunger" ? 6 + irand(rng, 8) : 10 + irand(rng, 14);
+        const w = rollWitch(rng, level);
+        const spot = spots[i % spots.length]!;
+        this.spawnWitch(w, t, spot.tx, spot.ty, rng);
+      }
+    }
     this.phase = "fight";
-    this.note = "The circle is shut. They choose their own cuts.";
-    this.last = null;
+    this.placing = false;
+    this.camMode = "team";
+    this.focus = 0;
+    this.frame();
+    this.camX = this.wantX;
+    this.camY = this.wantY;
+    this.zoom = this.wantZ;
+    this.note = this.mode === "hunger"
+      ? "Packs will drill or hunt. Follow a team, or fly free."
+      : "Last pack standing.";
     this.publish();
     this.resize();
   }
 
-  dismiss(): void {
-    if (this.phase === "over") return;
-    if (this.phase === "result") {
-      this.phase = "roster";
-      this.note = this.save ? `${this.save.points} marks. ${this.save.tokens} tokens.` : "";
-      this.publish();
-    }
+  again(): void {
+    this.launch();
   }
 
-  private persist(): void {
-    if (!this.save) return;
-    this.onCloud(this.save);
+  backSetup(): void {
+    this.phase = "setup";
+    this.placing = false;
+    this.fighters = [];
+    this.squads = [];
+    this.winner = "";
+    this.cfx = new CombatFx();
+    this.beams = [];
+    this.floats = [];
+    this.fitMap();
+    this.note = "Same map. Change the packs or run it again.";
     this.publish();
   }
 
+  private bind(): void {
+    this.canvas.addEventListener("pointerdown", this.onPointerDown);
+    window.addEventListener("pointermove", this.onPointerMove);
+    window.addEventListener("pointerup", this.onPointerUp);
+    this.canvas.addEventListener("wheel", this.onWheel, { passive: false });
+    window.addEventListener("keydown", this.onKeyDown);
+    window.addEventListener("keyup", this.onKeyUp);
+  }
+
+  private unbind(): void {
+    this.canvas.removeEventListener("pointerdown", this.onPointerDown);
+    window.removeEventListener("pointermove", this.onPointerMove);
+    window.removeEventListener("pointerup", this.onPointerUp);
+    this.canvas.removeEventListener("wheel", this.onWheel);
+    window.removeEventListener("keydown", this.onKeyDown);
+    window.removeEventListener("keyup", this.onKeyUp);
+    this.keys.clear();
+  }
+
+  private typing(e: Event): boolean {
+    const tag = (e.target as HTMLElement | null)?.tagName;
+    return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+  }
+
+  private onPointerDown = (e: PointerEvent): void => {
+    if (e.button !== 0) return;
+    const p = this.local(e);
+    this.drag = { x: p.x, y: p.y, camX: this.camX, camY: this.camY, moved: false };
+  };
+
+  private onPointerMove = (e: PointerEvent): void => {
+    if (!this.drag) return;
+    const p = this.local(e);
+    const dx = p.x - this.drag.x;
+    const dy = p.y - this.drag.y;
+    if (Math.hypot(dx, dy) > 5) this.drag.moved = true;
+    const look = this.camMode === "free" || this.placing || this.phase === "setup";
+    if (this.drag.moved && look) {
+      this.camX = this.drag.camX - dx / this.zoom;
+      this.camY = this.drag.camY - dy / this.zoom;
+      this.clampCam();
+    }
+  };
+
+  private onPointerUp = (e: PointerEvent): void => {
+    if (!this.drag) return;
+    const p = this.local(e);
+    const moved = this.drag.moved;
+    this.drag = null;
+    if (!moved && this.placing) this.dropZone(p.x, p.y);
+  };
+
+  private onWheel = (e: WheelEvent): void => {
+    e.preventDefault();
+    this.zoomBy(e.deltaY > 0 ? 0.9 : 1.1);
+  };
+
+  private onKeyDown = (e: KeyboardEvent): void => {
+    if (this.typing(e)) return;
+    const k = e.key.toLowerCase();
+    if (k === "q") {
+      this.cycleTeam(-1);
+      e.preventDefault();
+      return;
+    }
+    if (k === "e") {
+      this.cycleTeam(1);
+      e.preventDefault();
+      return;
+    }
+    if (["w", "a", "s", "d", "arrowup", "arrowdown", "arrowleft", "arrowright"].includes(k)) {
+      this.keys.add(k);
+      e.preventDefault();
+    }
+  };
+
+  private onKeyUp = (e: KeyboardEvent): void => {
+    this.keys.delete(e.key.toLowerCase());
+  };
+
+  private local(e: { clientX: number; clientY: number }): { x: number; y: number } {
+    const r = this.canvas.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
+  }
+
+  private screenToWorld(sx: number, sy: number): { x: number; y: number } {
+    return {
+      x: (sx - this.viewW / 2) / this.zoom + this.camX,
+      y: (sy - this.viewH / 2) / this.zoom + this.camY,
+    };
+  }
+
+  private dropZone(sx: number, sy: number): void {
+    const w = this.screenToWorld(sx, sy);
+    const tx = Math.floor(w.x / TILE);
+    const ty = Math.floor(w.y / TILE);
+    if (tx < 0 || ty < 0 || tx >= this.gw || ty >= this.gh) return;
+    const i = Math.max(0, Math.min(this.teamCount - 1, this.placeFor));
+    this.zones[i] = this.clampZone(tx, ty);
+    const next = this.zones.findIndex((z, idx) => idx !== i && !z);
+    this.placeFor = next >= 0 ? next : (i + 1) % this.teamCount;
+    this.note = `${SQUADS[i]!.name} is planted. ${this.zones.every(Boolean) ? "All pads are set." : `Next: ${SQUADS[this.placeFor]!.name}.`}`;
+    this.publish();
+  }
+
+  private clampZone(tx: number, ty: number): TeamZone {
+    const span = Math.max(3, Math.min(6, Math.floor(Math.min(this.gw, this.gh) / 8)));
+    const x = Math.max(1, Math.min(this.gw - span - 1, tx - Math.floor(span / 2)));
+    const y = Math.max(1, Math.min(this.gh - span - 1, ty - Math.floor(span / 2)));
+    return { tx: x, ty: y, tw: span, th: span };
+  }
+
+  private ensureZones(): void {
+    let missing = false;
+    for (let i = 0; i < this.teamCount; i++) if (!this.zones[i]) missing = true;
+    if (missing || this.zones.length < this.teamCount) this.autoZones();
+  }
+
+  private loadMap(id: string): void {
+    const file = id === "default" ? null : savedMaps().find((m) => m.id === id) ?? null;
+    const useDefault = !file;
+    this.mapId = useDefault ? "default" : file.id;
+    if (useDefault) {
+      const built = buildMap(mulberry32(0xc1ec1e));
+      this.grid = built.grid;
+      this.gw = built.w;
+      this.gh = built.h;
+      const tiles = Array.from(built.grid, (c) => {
+        if (c === 1) return { floor: 1, biome: 4, block: 1, decor: 0 };
+        if (c === 2) return { floor: 7, biome: 6, block: 0, decor: 0 };
+        if (c === 3) return { floor: 6, biome: 5, block: 0, decor: 0 };
+        return { floor: 0, biome: 2, block: 0, decor: 0 };
+      });
+      this.world = { w: built.w, h: built.h, tiles, spawns: [], cache: null };
+      this.mapName = "Default circle";
+    } else {
+      const world = mapToWorld(file);
+      this.world = world;
+      this.gw = world.w;
+      this.gh = world.h;
+      this.grid = new Uint8Array(world.tiles.length);
+      world.tiles.forEach((t, i) => {
+        this.grid[i] = t.block ? 1 : t.floor === 11 || t.floor === 7 ? 2 : t.floor === 2 || t.floor === 5 ? 3 : 0;
+      });
+      this.mapName = file.name;
+    }
+    this.zones = Array.from({ length: this.teamCount }, () => null);
+    this.fitMap();
+  }
+
+  private fitMap(): void {
+    if (this.viewW < 8 || this.viewH < 8 || this.gw < 2) return;
+    const mw = this.gw * TILE;
+    const mh = this.gh * TILE;
+    this.camX = mw / 2;
+    this.camY = mh / 2;
+    this.zoom = Math.max(0.18, Math.min(1.5, Math.min(this.viewW / mw, this.viewH / mh) * 0.92));
+    this.wantX = this.camX;
+    this.wantY = this.camY;
+    this.wantZ = this.zoom;
+    this.clampCam();
+  }
+
+  private clampCam(): void {
+    const mw = this.gw * TILE;
+    const mh = this.gh * TILE;
+    this.camX = Math.max(0, Math.min(mw, this.camX));
+    this.camY = Math.max(0, Math.min(mh, this.camY));
+  }
+
+  private spotsIn(zone: TeamZone, n: number): { tx: number; ty: number }[] {
+    const open: { tx: number; ty: number }[] = [];
+    for (let y = zone.ty; y < zone.ty + zone.th; y++) {
+      for (let x = zone.tx; x < zone.tx + zone.tw; x++) {
+        if ((this.grid[y * this.gw + x] ?? 1) !== 1) open.push({ tx: x, ty: y });
+      }
+    }
+    if (!open.length) {
+      const cx = zone.tx + (zone.tw >> 1);
+      const cy = zone.ty + (zone.th >> 1);
+      for (let r = 1; r < 40 && !open.length; r++) {
+        for (let y = cy - r; y <= cy + r; y++) {
+          for (let x = cx - r; x <= cx + r; x++) {
+            if (x < 1 || y < 1 || x >= this.gw - 1 || y >= this.gh - 1) continue;
+            if (this.grid[y * this.gw + x] !== 1) open.push({ tx: x, ty: y });
+          }
+        }
+      }
+    }
+    if (!open.length) open.push({ tx: Math.min(this.gw - 2, 2), ty: Math.min(this.gh - 2, 2) });
+    const out: { tx: number; ty: number }[] = [];
+    for (let i = 0; i < n; i++) out.push(open[Math.min(open.length - 1, Math.floor((i * open.length) / n))]!);
+    return out;
+  }
+
+  private color(side: number): string {
+    return SQUADS[side]?.color ?? "#f0e2c8";
+  }
+
   private publish(): void {
-    const save = this.save;
-    const yours = this.fighters.filter((f) => f.side === 0 && f.role !== "spirit" && f.alive).length;
-    const theirs = this.fighters.filter((f) => f.side === 1 && f.role !== "spirit" && f.alive).length;
+    const maps = [{ id: "default", name: "Default circle" }, ...savedMaps().map((m) => ({ id: m.id, name: m.name }))];
+    const fighting = this.phase === "fight" || this.phase === "result";
+    const teams: ArenaTeamSnap[] = Array.from({ length: this.teamCount }, (_, id) => {
+      const pack = this.fighters.filter((f) => f.side === id && f.role !== "spirit");
+      const alive = pack.filter((f) => f.alive);
+      const level = alive.length ? Math.round(alive.reduce((s, f) => s + f.level, 0) / alive.length) : 0;
+      const intent = fighting ? (this.squads[id]?.intent === "train" ? "Drilling" : "Hunting") : this.zones[id] ? "Placed" : "No pad";
+      return {
+        id,
+        name: SQUADS[id]!.name,
+        color: SQUADS[id]!.color,
+        alive: fighting ? alive.length : 0,
+        count: this.perTeam,
+        level,
+        intent,
+        placed: !!this.zones[id],
+      };
+    });
+    const s = Math.max(0, Math.floor(this.age));
     this.snap = {
       phase: this.phase,
-      points: save?.points ?? 0,
-      tokens: save?.tokens ?? 0,
-      wins: save?.wins ?? 0,
-      losses: save?.losses ?? 0,
-      roster: (save?.roster ?? []).map((w) => cardOf(w, !!save?.party.includes(w.uid))),
-      party: save?.party.length ?? 0,
       note: this.note,
       speed: this.speed,
-      yours: this.phase === "fight" || this.phase === "result" ? yours : 6,
-      theirs: this.phase === "fight" || this.phase === "result" ? theirs : 6,
-      last: this.last,
+      mode: this.mode,
+      cam: this.camMode,
+      mapId: this.mapId,
+      mapName: this.mapName,
+      maps,
+      teamCount: this.teamCount,
+      perTeam: this.perTeam,
+      placing: this.placing,
+      placeFor: this.placeFor,
+      focus: this.focus,
+      teams,
+      clock: `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`,
+      winner: this.winner,
     };
     this.listeners.forEach((fn) => fn());
   }
 
-  private spawnWitch(w: ArenaWitch, side: 0 | 1, tx: number, ty: number, rng: Rng): void {
+  private spawnWitch(w: ArenaWitch, side: number, tx: number, ty: number, rng: Rng): void {
     const gear = [w.weapon, ...w.gear];
     const id = nextUid();
     const body = this.makeBody(w, side, tx, ty, id, "", w.role, w.talent * (w.role === "summoner" ? 0.2 : 1));
@@ -817,11 +1161,9 @@ export class WitchArena {
     body.double = ench(gear, "double_strike");
     body.second = ench(gear, "second_chance") > 0;
     this.fighters.push(body);
-    if (side === 0) body.grave = graveOf(w);
     if (w.role !== "summoner") return;
     w.spirits.forEach((s, i) => {
-      const sx = tx + (side === 0 ? 2 : -2);
-      const sy = ty - 1 + i;
+      const spot = this.openNear(tx, ty, i);
       const spirit = this.makeBody(
         {
           name: s.name,
@@ -837,8 +1179,8 @@ export class WitchArena {
           skin: w.skin,
         },
         side,
-        sx,
-        sy,
+        spot.tx,
+        spot.ty,
         nextUid(),
         id,
         "spirit",
@@ -855,9 +1197,23 @@ export class WitchArena {
     });
   }
 
+  private openNear(tx: number, ty: number, i: number): { tx: number; ty: number } {
+    const opts = [
+      [tx + 1, ty],
+      [tx - 1, ty],
+      [tx, ty + 1],
+      [tx, ty - 1],
+      [tx + 1, ty + 1],
+      [tx - 1, ty - 1],
+    ];
+    const [x, y] = opts[i % opts.length]!;
+    if (x > 0 && y > 0 && x < this.gw - 1 && y < this.gh - 1 && this.grid[y * this.gw + x] !== 1) return { tx: x, ty: y };
+    return { tx, ty };
+  }
+
   private makeBody(
     w: Pick<ArenaWitch, "name" | "race" | "type" | "level" | "maxHp" | "speed" | "moves" | "weapon" | "gear" | "hair" | "skin">,
-    side: 0 | 1,
+    side: number,
     tx: number,
     ty: number,
     id: string,
@@ -885,11 +1241,11 @@ export class WitchArena {
       hp: w.maxHp,
       max: w.maxHp,
       speed: w.speed,
-      facing: side === 0 ? 1 : -1,
-      direction: side === 0 ? "right" : "left",
+      facing: 1,
+      direction: "down",
       walk: 0,
       hurt: 0,
-      cd: 0.3 + Math.random() * 0.4,
+      cd: 0.25 + Math.random() * 0.45,
       shield: 0,
       root: 0,
       sleep: 0,
@@ -922,12 +1278,14 @@ export class WitchArena {
       hair: w.hair,
       skin: w.skin,
       tall: 1,
+      xp: 0,
     };
   }
 
   private step(dt: number): void {
     this.age += dt;
     this.clock += dt;
+    this.drill(dt);
     for (const f of this.fighters) {
       if (!f.alive) continue;
       f.hurt = Math.max(0, f.hurt - dt * 3);
@@ -952,18 +1310,49 @@ export class WitchArena {
       if (f.sleep > 0) continue;
       f.think -= dt;
       if (f.think <= 0) {
-        f.think = 0.28 + Math.random() * 0.12;
+        f.think = 0.32 + Math.random() * 0.16;
         this.think(f);
       }
       if (f.root <= 0) this.follow(f, dt, cell === 3);
       this.strike(f);
     }
+    this.cfx.tick(dt);
     for (const b of this.beams) b.life -= dt;
     this.beams = this.beams.filter((b) => b.life > 0);
     for (const fl of this.floats) fl.life -= dt;
     this.floats = this.floats.filter((fl) => fl.life > 0);
-    this.frame();
-    if (this.age > 0.6) this.maybeEnd();
+    if (this.age > 1.2) this.maybeEnd();
+  }
+
+  private drill(dt: number): void {
+    if (this.mode !== "hunger") return;
+    for (let s = 0; s < this.squads.length; s++) {
+      const squad = this.squads[s]!;
+      if (squad.intent !== "train") continue;
+      const pack = this.fighters.filter((f) => f.alive && f.side === s && f.role !== "spirit");
+      if (!pack.length) continue;
+      let cx = 0;
+      let cy = 0;
+      for (const f of pack) {
+        cx += f.x;
+        cy += f.y;
+      }
+      cx /= pack.length;
+      cy /= pack.length;
+      if (Math.hypot(cx - squad.gx, cy - squad.gy) > 78) continue;
+      for (const f of pack) {
+        f.xp += dt * 16;
+        f.hp = Math.min(f.max, f.hp + dt * 4);
+        if (f.xp < 32) continue;
+        f.xp = 0;
+        f.level += 1;
+        f.max = Math.round(f.max + 8 + f.level * 0.35);
+        f.hp = Math.min(f.max, f.hp + 16);
+        f.dmgMul *= 1.05;
+        f.speed += 1;
+        this.float(f.x, f.y - 36, `Lv ${f.level}`, this.color(s));
+      }
+    }
   }
 
   private think(f: Fighter): void {
@@ -971,70 +1360,114 @@ export class WitchArena {
     const foes = this.fighters.filter((o) => o.alive && o.side !== f.side && o.role !== "spirit");
     const anyFoe = this.fighters.filter((o) => o.alive && o.side !== f.side);
     const pool = foes.length ? foes : anyFoe;
-    if (!pool.length) return;
-    let goal = this.goalFor(f, allies, pool);
+    if (f.role === "spirit") {
+      const master = allies.find((a) => a.id === f.master);
+      if (master) {
+        const ang = Math.atan2(f.y - master.y, f.x - master.x) || 0;
+        this.seek(f, master.x + Math.cos(ang) * 26, master.y + Math.sin(ang) * 20);
+      }
+      return;
+    }
+    const witches = allies.filter((o) => o.role !== "spirit");
+    const leader = witches[0];
+    if (!leader) return;
+    if (f.id !== leader.id) {
+      const idx = Math.max(1, witches.indexOf(f));
+      const ang = (idx / Math.max(2, witches.length)) * Math.PI * 2;
+      const radius = 28 + (idx % 3) * 12;
+      this.seek(f, leader.x + Math.cos(ang) * radius, leader.y + Math.sin(ang) * radius * 0.82);
+      return;
+    }
+    const squad = this.squads[f.side];
+    if (!squad) return;
+    if (this.age >= squad.until) this.retarget(f, squad, pool);
+    if (!pool.length) {
+      this.seek(f, squad.gx, squad.gy);
+      return;
+    }
+    if (this.mode === "classic" || squad.intent === "hunt") {
+      const target = this.pickTarget(f, pool);
+      const move = this.bestMove(f, target, false);
+      const reach = attackRange(move);
+      const d = Math.hypot(target.x - f.x, target.y - f.y);
+      const form = attackForm(move);
+      if (form !== "melee" && d <= reach * 0.88 && this.sees(f.x, f.y, target.x, target.y)) {
+        f.path = [];
+        return;
+      }
+      const ang = Math.atan2(f.y - target.y, f.x - target.x);
+      const hold = form === "melee" ? 26 : Math.min(reach * 0.7, 108);
+      this.seek(f, target.x + Math.cos(ang) * hold, target.y + Math.sin(ang) * hold);
+      return;
+    }
+    this.seek(f, squad.gx, squad.gy);
+  }
+
+  private retarget(leader: Fighter, squad: Squad, foes: Fighter[]): void {
+    const near = foes.length ? nearest(foes, leader.x, leader.y) : null;
+    const nd = near ? Math.hypot(near.x - leader.x, near.y - leader.y) : 1e9;
+    if (this.mode === "classic") {
+      squad.intent = "hunt";
+      squad.until = this.age + 2.2;
+      return;
+    }
+    const hurt = leader.hp / leader.max < 0.4;
+    if (hurt) squad.intent = "train";
+    else if (nd < 220) squad.intent = Math.random() < 0.74 ? "hunt" : "train";
+    else squad.intent = Math.random() < 0.42 ? "hunt" : "train";
+    squad.until = this.age + 7 + Math.random() * 8;
+    squad.told = false;
+    if (squad.intent === "train" || !near) {
+      const spot = this.roamSpot(leader);
+      squad.gx = spot.x;
+      squad.gy = spot.y;
+    }
+    this.float(leader.x, leader.y - 42, squad.intent === "train" ? "drill" : "hunt", this.color(leader.side));
+  }
+
+  private roamSpot(f: Fighter): { x: number; y: number } {
+    for (let i = 0; i < 16; i++) {
+      const tx = 2 + Math.floor(Math.random() * Math.max(1, this.gw - 4));
+      const ty = 2 + Math.floor(Math.random() * Math.max(1, this.gh - 4));
+      if ((this.grid[ty * this.gw + tx] ?? 1) === 1) continue;
+      const x = tx * TILE + TILE / 2;
+      const y = ty * TILE + TILE / 2;
+      if (Math.hypot(x - f.x, y - f.y) > 180 || i > 10) return { x, y };
+    }
+    return { x: f.x, y: f.y };
+  }
+
+  private seek(f: Fighter, x: number, y: number): void {
     const moved = Math.hypot(f.x - f.lastX, f.y - f.lastY);
-    if (moved < 5) f.stuck += 0.35;
+    if (moved < 4) f.stuck += 0.4;
     else f.stuck = 0;
     f.lastX = f.x;
     f.lastY = f.y;
-    if (f.stuck > 1) {
+    if (f.stuck > 1.15) {
       f.stuck = 0;
       const ang = Math.random() * Math.PI * 2;
-      goal = { x: f.x + Math.cos(ang) * 70, y: f.y + Math.sin(ang) * 70 };
+      x = f.x + Math.cos(ang) * 90;
+      y = f.y + Math.sin(ang) * 90;
+      f.path = [];
     }
-    const fear = f.hp / f.max > 0.35;
-    this.pathTo(f, goal.x, goal.y, fear);
+    const d = Math.hypot(x - f.x, y - f.y);
+    if (d < 16) {
+      f.path = [];
+      return;
+    }
+    const direct = this.gw * this.gh > 8000 ? 520 : 240;
+    if (d < direct && this.sees(f.x, f.y, x, y)) {
+      f.path = [{ x, y }];
+      return;
+    }
+    this.pathTo(f, x, y, f.hp / f.max > 0.35);
   }
 
-  private goalFor(f: Fighter, allies: Fighter[], foes: Fighter[]): { x: number; y: number } {
-    if (f.role === "summoner") {
-      const spirits = allies.filter((a) => a.master === f.id);
-      if (spirits.length) {
-        let sx = 0;
-        let sy = 0;
-        for (const s of spirits) {
-          sx += s.x;
-          sy += s.y;
-        }
-        sx /= spirits.length;
-        sy /= spirits.length;
-        const threat = nearest(foes, sx, sy);
-        const dx = sx - threat.x;
-        const dy = sy - threat.y;
-        const l = Math.hypot(dx, dy) || 1;
-        return { x: sx - (dx / l) * 46, y: sy - (dy / l) * 46 };
-      }
-    }
-    if (f.role === "spirit") {
-      const master = allies.find((a) => a.id === f.master);
-      if (master && Math.hypot(f.x - master.x, f.y - master.y) > 128) return { x: master.x, y: master.y + 18 };
-    }
-    const target = this.pickTarget(f, foes);
-    const move = this.bestMove(f, target, false);
-    const reach = attackRange(move);
-    const form = attackForm(move);
-    const d = Math.hypot(target.x - f.x, target.y - f.y);
-    if (form !== "melee") {
-      if (d < reach * 0.5) {
-        const ang = Math.atan2(f.y - target.y, f.x - target.x);
-        return { x: f.x + Math.cos(ang) * 90, y: f.y + Math.sin(ang) * 90 };
-      }
-      if (d <= reach * 0.92 && los(this.grid, this.gw, this.gh, f.x, f.y, target.x, target.y)) return { x: f.x, y: f.y };
-    }
-    const ang = Math.atan2(f.y - target.y, f.x - target.x);
-    const hold = form === "melee" ? 28 : Math.min(reach * 0.75, 120);
-    return { x: target.x + Math.cos(ang) * hold, y: target.y + Math.sin(ang) * hold };
+  private sees(x0: number, y0: number, x1: number, y1: number): boolean {
+    return los(this.grid, this.gw, this.gh, x0, y0, x1, y1);
   }
 
   private pickTarget(f: Fighter, foes: Fighter[]): Fighter {
-    if (f.role === "summoner") {
-      const spirits = this.fighters.filter((a) => a.alive && a.master === f.id);
-      if (spirits.length) {
-        const weak = spirits.reduce((a, b) => (a.hp / a.max < b.hp / b.max ? a : b));
-        return nearest(foes, weak.x, weak.y);
-      }
-    }
     let best = foes[0]!;
     let score = 1e9;
     for (const o of foes) {
@@ -1087,7 +1520,7 @@ export class WitchArena {
     const gx = Math.floor(x / TILE);
     const gy = Math.floor(y / TILE);
     if (sx === gx && sy === gy) {
-      f.path = [];
+      f.path = [{ x, y }];
       return;
     }
     f.path = route(this.grid, this.gw, this.gh, sx, sy, gx, gy, fear);
@@ -1109,15 +1542,14 @@ export class WitchArena {
     for (const o of this.fighters) {
       if (o === f || !o.alive || o.side !== f.side) continue;
       const d = Math.hypot(f.x - o.x, f.y - o.y);
-      if (d < 22 && d > 0.2) {
-        dx += ((f.x - o.x) / d) * 10;
-        dy += ((f.y - o.y) / d) * 10;
+      if (d < 18 && d > 0.2) {
+        dx += ((f.x - o.x) / d) * 8;
+        dy += ((f.y - o.y) / d) * 8;
       }
     }
     const mag = Math.hypot(dx, dy) || 1;
     const speed = f.speed * (mud ? 0.55 : 1) * (f.role === "spirit" ? 1.05 : 1);
     this.slide(f, (dx / mag) * speed * dt, (dy / mag) * speed * dt);
-
   }
 
   private slide(f: Fighter, dx: number, dy: number): void {
@@ -1138,24 +1570,31 @@ export class WitchArena {
   private strike(f: Fighter): void {
     if (f.cd > 0 || f.sleep > 0) return;
     const foes = this.fighters.filter((o) => o.alive && o.side !== f.side);
+    const allies = this.fighters.filter((o) => o.alive && o.side === f.side);
+    const hurt = f.hp / f.max < 0.5 ? this.lowestFriend(f) : null;
+    if (hurt && hurt.hp / hurt.max < 0.55) {
+      const mend = f.moveIds.map((id) => MOVE_BY_ID[id]).find((m) => m && (m.effect === "mend" || moveTactic(m) === "heal"));
+      if (mend && Math.hypot(hurt.x - f.x, hurt.y - f.y) < attackRange(mend) + 8) {
+        this.cast(f, hurt, mend, true);
+        f.cd = this.cooldown(f, mend);
+        return;
+      }
+    }
     if (!foes.length) return;
     const witches = foes.filter((o) => o.role !== "spirit");
     const target = this.pickTarget(f, witches.length ? witches : foes);
     const move = this.bestMove(f, target, true);
     const tactic = moveTactic(move);
     if (tactic === "heal" || move.effect === "mend") {
-      const ally = f.role === "summoner" ? this.lowestFriend(f) : f.hp / f.max < 0.7 ? f : this.lowestFriend(f);
-      if (!ally) return;
-      const heal = (10 + move.power * 0.7) * (0.75 + f.dmgMul);
-      ally.hp = Math.min(ally.max, ally.hp + heal);
-      this.float(ally.x, ally.y - 28, `${Math.round(heal)}`, "#9ad8c8");
-      this.beams.push({ x0: f.x, y0: f.y - 20, x1: ally.x, y1: ally.y - 16, life: 0.18, color: "#9ad8c8" });
+      const ally = hurt && hurt.hp / hurt.max < 0.7 ? hurt : allies.reduce((a, b) => (a.hp / a.max < b.hp / b.max ? a : b), f);
+      if (Math.hypot(ally.x - f.x, ally.y - f.y) > attackRange(move) + 8) return;
+      this.cast(f, ally, move, true);
       f.cd = this.cooldown(f, move);
       return;
     }
     if ((tactic === "ward" || move.effect === "shell") && f.shield <= 0) {
-      f.shield = 2.5;
-      this.float(f.x, f.y - 30, "ward", "#e6c15a");
+      this.cast(f, f, move, true);
+      f.shield = 2.6;
       f.cd = this.cooldown(f, move);
       return;
     }
@@ -1164,17 +1603,19 @@ export class WitchArena {
     if (tactic === "roll" && d < 78) {
       const ang = Math.atan2(f.y - target.y, f.x - target.x);
       this.slide(f, Math.cos(ang) * 54, Math.sin(ang) * 54);
+      this.cfx.cast(move, attackForm(move), tactic, f.x, f.y - 16, f.x + Math.cos(ang) * 54, f.y + Math.sin(ang) * 54);
       f.cd = 0.55;
       return;
     }
-    if (d > reach + 6) return;
+    if (d > reach + 8) return;
     const form = attackForm(move);
-    if (form !== "melee" && !los(this.grid, this.gw, this.gh, f.x, f.y - 8, target.x, target.y - 8)) return;
+    if (form !== "melee" && !this.sees(f.x, f.y - 8, target.x, target.y - 8)) return;
     if (tactic === "blink" && d > 46) {
       const ang = Math.atan2(target.y - f.y, target.x - f.x);
       const nx = target.x - Math.cos(ang) * 30;
       const ny = target.y - Math.sin(ang) * 30;
       if (!this.pillar(nx, ny)) {
+        this.cfx.cast(move, form, tactic, f.x, f.y - 12, nx, ny - 12);
         f.x = nx;
         f.y = ny;
       }
@@ -1182,33 +1623,38 @@ export class WitchArena {
       const ang = Math.atan2(target.y - f.y, target.x - f.x);
       this.slide(f, Math.cos(ang) * Math.min(d - 24, 80), Math.sin(ang) * Math.min(d - 24, 80));
     }
-    this.cast(f, target, move);
+    this.cast(f, target, move, false);
     f.cd = this.cooldown(f, move);
     f.facing = target.x < f.x ? -1 : 1;
   }
 
   private cooldown(f: Fighter, move: Move): number {
     const tactic = moveTactic(move);
-    const base = tactic === "heavy" || tactic === "channel" ? 1.55 : tactic === "roll" ? 0.7 : 0.95;
-    return Math.max(0.35, base * (1 - Math.min(0.35, f.swift / 120)) * (f.role === "spirit" ? 1.15 : 1));
+    const base = tactic === "heavy" || tactic === "channel" ? 1.45 : tactic === "roll" ? 0.7 : 0.85;
+    return Math.max(0.32, base * (1 - Math.min(0.35, f.swift / 120)) * (f.role === "spirit" ? 1.15 : 1));
   }
 
-  private cast(f: Fighter, target: Fighter, move: Move): void {
+  private cast(f: Fighter, target: Fighter, move: Move, aid: boolean): void {
+    const y0 = f.y - 18;
+    const y1 = target.y - 14;
+    this.beams.push({ x0: f.x, y0, x1: target.x, y1, life: 0.34, color: TYPES[move.type].color });
+    this.cfx.cast(move, attackForm(move), moveTactic(move), f.x, y0, target.x, y1);
+    if (aid) {
+      if (move.effect === "mend" || moveTactic(move) === "heal") {
+        const heal = (10 + move.power * 0.7) * (0.75 + f.dmgMul);
+        target.hp = Math.min(target.max, target.hp + heal);
+        this.float(target.x, target.y - 28, `${Math.round(heal)}`, "#9ad8c8");
+      } else this.float(f.x, f.y - 30, "ward", "#e6c15a");
+      return;
+    }
     const tm = typeMult(move.type, target.type);
-    this.beams.push({
-      x0: f.x,
-      y0: f.y - 18,
-      x1: target.x,
-      y1: target.y - 16,
-      life: 0.16,
-      color: TYPES[move.type].color,
-    });
     if (tm === 0) {
       this.float(target.x, target.y - 26, "immune", "#e7d9ff");
       return;
     }
     if (Math.random() * 100 < target.echo) {
       this.float(target.x, target.y - 26, "miss", "#f0e2c8");
+      this.cfx.evade(target.x, target.y - 12);
       return;
     }
     const form = attackForm(move);
@@ -1233,9 +1679,8 @@ export class WitchArena {
     for (let i = 0; i < hits; i++) this.hurt(target, Math.max(1, dmg * (hits === 2 ? 0.8 : 1)), crit ? "#fff1a8" : "#fff6e8");
     if (move.effect === "burn") target.burn = Math.max(target.burn, 2.4);
     if (move.effect === "root") target.root = Math.max(target.root, 1.3);
-    const wasAsleep = target.sleep > 0;
-    if (wasAsleep) target.sleep = 0;
-    if (move.effect === "sleep" && Math.random() < 0.45) target.sleep = 1.4;
+    if (target.sleep > 0) target.sleep = 0;
+    else if (move.effect === "sleep" && Math.random() < 0.45) target.sleep = 1.4;
     if (move.effect === "leech") f.hp = Math.min(f.max, f.hp + dmg * 0.25);
   }
 
@@ -1253,14 +1698,6 @@ export class WitchArena {
     }
     f.hp = 0;
     f.alive = false;
-    if (f.grave && !f.buried) {
-      f.buried = true;
-      const key = `${f.grave.name}:${f.grave.level}:${f.grave.note}`;
-      if (!this.buriedKeys.has(key)) {
-        this.buriedKeys.add(key);
-        this.onGrave(f.grave);
-      }
-    }
     if (f.role !== "spirit") {
       for (const s of this.fighters) {
         if (s.master === f.id && s.alive) {
@@ -1269,14 +1706,6 @@ export class WitchArena {
           this.float(s.x, s.y - 16, "unravels", "#b9a8d8");
         }
       }
-    }
-    if (f.side === 1 && f.role !== "spirit" && !f.tokened && this.save) {
-      f.tokened = true;
-      this.save.tokens += 1;
-      this.gained += 1;
-      this.float(f.x, f.y - 42, "+1 token", "#e6c15a");
-      this.note = `${f.name} falls. Token in the jar.`;
-      this.publish();
     }
   }
 
@@ -1288,79 +1717,90 @@ export class WitchArena {
   }
 
   private maybeEnd(): void {
-    const you = this.fighters.some((f) => f.alive && f.side === 0 && f.role !== "spirit");
-    const them = this.fighters.some((f) => f.alive && f.side === 1 && f.role !== "spirit");
-    if (you && them && this.age < 70) return;
-    let win = you && !them;
-    let timed = "";
-    if (you && them) {
-      const score = (side: 0 | 1) =>
-        this.fighters.filter((f) => f.alive && f.side === side && f.role !== "spirit").reduce((s, f) => s + f.hp / f.max, 0);
-      win = score(0) >= score(1);
-      timed = win ? "The circle calls time. Your six held more life." : "The circle calls time. Their six held more life.";
-    }
-    const save = this.save;
-    if (!save) return;
-    save.points += win ? 1 : -1;
-    if (win) save.wins += 1;
-    else save.losses += 1;
-    const tokens = this.gained;
-    if (save.points <= 0) {
-      for (const w of save.roster) {
-        const g = graveOf(w);
-        const key = `${g.name}:${g.level}:${g.note}`;
-        if (this.buriedKeys.has(key)) continue;
-        this.buriedKeys.add(key);
-        this.onGrave(g);
-      }
-      this.last = { win: false, tokens, note: "No marks left. The circle forgets this coven." };
-      this.phase = "over";
-      this.note = this.last.note;
-      this.save = null;
-      this.onCloud(null);
-      this.publish();
+    const living = new Set<number>();
+    for (const f of this.fighters) if (f.alive && f.role !== "spirit") living.add(f.side);
+    const cap = this.mode === "classic" ? 480 : 360;
+    if (living.size > 1 && this.age < cap) return;
+    if (living.size === 0) {
+      this.finish("No one left standing.");
       return;
     }
-    this.last = {
-      win,
-      tokens,
-      note: timed || (win ? `The six stand. +1 mark. ${tokens} tokens from the dead.` : `Your six break. -1 mark. ${tokens} tokens kept.`),
-    };
+    if (living.size === 1) {
+      const id = [...living][0]!;
+      this.finish(`${SQUADS[id]!.name} holds the field.`);
+      return;
+    }
+    let best = 0;
+    let bestS = -1;
+    for (const id of living) {
+      const score = this.fighters.filter((f) => f.alive && f.side === id && f.role !== "spirit").reduce((s, f) => s + f.hp / f.max, 0);
+      if (score > bestS) {
+        bestS = score;
+        best = id;
+      }
+    }
+    this.finish(`Time. ${SQUADS[best]!.name} still has the most life.`);
+  }
+
+  private finish(note: string): void {
+    this.winner = note;
     this.phase = "result";
-    this.note = this.last.note;
-    this.persist();
+    this.note = note;
+    this.publish();
   }
 
   private frame(): void {
-    const living = this.fighters.filter((f) => f.alive);
-    const witches = living.filter((f) => f.role !== "spirit");
-    const focus = witches.length <= 2 && witches.length > 0 ? witches : living.length ? living : this.fighters;
+    const pack = this.fighters.filter((f) => f.alive && f.side === this.focus && f.role !== "spirit");
+    const focus = pack.length ? pack : this.fighters.filter((f) => f.alive && f.role !== "spirit");
+    const use = focus.length ? focus : this.fighters.filter((f) => f.alive);
+    if (!use.length) return;
     let minX = 1e9;
     let minY = 1e9;
     let maxX = -1e9;
     let maxY = -1e9;
-    for (const f of focus) {
+    for (const f of use) {
       minX = Math.min(minX, f.x);
       minY = Math.min(minY, f.y);
       maxX = Math.max(maxX, f.x);
       maxY = Math.max(maxY, f.y);
     }
-    const cx = (minX + maxX) / 2;
-    const cy = (minY + maxY) / 2 - 10;
-    const span = Math.max(maxX - minX, maxY - minY, witches.length <= 2 ? 160 : 280);
-    const fit = Math.min(this.viewW, this.viewH) / (span + (witches.length <= 2 ? 180 : 280));
-    const cap = witches.length <= 2 ? 2.05 : 1.05;
-    this.wantX = cx;
-    this.wantY = cy;
-    this.wantZ = Math.max(0.42, Math.min(cap, fit));
-    const k = Math.min(1, 0.08);
+    const span = Math.max(maxX - minX, maxY - minY, 150);
+    const fit = Math.min(this.viewW, this.viewH) / (span + 240);
+    this.wantX = (minX + maxX) / 2;
+    this.wantY = (minY + maxY) / 2 - 8;
+    this.wantZ = Math.max(0.85, Math.min(1.5, fit));
+    const k = Math.min(1, 0.12);
     this.camX += (this.wantX - this.camX) * k;
     this.camY += (this.wantY - this.camY) * k;
     this.zoom += (this.wantZ - this.zoom) * k;
   }
 
+  private driveCam(dt: number): void {
+    let x = 0;
+    let y = 0;
+    if (this.keys.has("a") || this.keys.has("arrowleft")) x -= 1;
+    if (this.keys.has("d") || this.keys.has("arrowright")) x += 1;
+    if (this.keys.has("w") || this.keys.has("arrowup")) y -= 1;
+    if (this.keys.has("s") || this.keys.has("arrowdown")) y += 1;
+    if ((x || y) && this.camMode === "team" && (this.phase === "fight" || this.phase === "result")) {
+      this.camMode = "free";
+      this.publish();
+    }
+    const pan = this.camMode === "free" || this.placing || this.phase === "setup" || this.phase === "result";
+    if ((x || y) && pan && !(this.camMode === "team" && this.phase === "result")) {
+      const m = Math.hypot(x, y) || 1;
+      const sp = 520 / Math.max(0.35, this.zoom);
+      this.camX += (x / m) * sp * dt;
+      this.camY += (y / m) * sp * dt;
+      this.clampCam();
+      return;
+    }
+    if ((this.phase === "fight" || this.phase === "result") && this.camMode === "team") this.frame();
+  }
+
   private float(x: number, y: number, text: string, color: string): void {
-    this.floats.push({ x, y, text, life: 0.8, color });
+    if (this.floats.length > 80) this.floats.shift();
+    this.floats.push({ x, y, text, life: 0.9, color });
   }
 
   private draw(): void {
@@ -1369,61 +1809,15 @@ export class WitchArena {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.fillStyle = "#100c0a";
     ctx.fillRect(0, 0, this.viewW, this.viewH);
-    if (this.phase === "roster" || this.phase === "over" || !this.grid.length) {
-      ctx.fillStyle = "#f0e2c8";
-      ctx.font = "12px 'Press Start 2P', monospace";
-      ctx.fillText("CIRCLE", 24, 48);
-      return;
-    }
+    if (!this.world) return;
     ctx.save();
     ctx.translate(this.viewW / 2, this.viewH / 2);
     ctx.scale(this.zoom, this.zoom);
     ctx.translate(-this.camX, -this.camY);
     ctx.imageSmoothingEnabled = false;
-    for (let y = 0; y < this.gh; y++) {
-      for (let x = 0; x < this.gw; x++) {
-        const cell = this.grid[y * this.gw + x] ?? 0;
-        ctx.fillStyle = (x + y) % 2 === 0 ? "#2a211c" : "#241c18";
-        ctx.fillRect(x * TILE, y * TILE, TILE, TILE);
-        if (cell === 2) {
-          ctx.strokeStyle = "#c4473a";
-          ctx.lineWidth = 2;
-          ctx.beginPath();
-          ctx.arc(x * TILE + 16, y * TILE + 16, 8, 0, Math.PI * 2);
-          ctx.stroke();
-          ctx.fillStyle = "rgba(196,71,58,0.35)";
-          ctx.fill();
-        } else if (cell === 3) {
-          ctx.fillStyle = "#3a2a18";
-          ctx.beginPath();
-          ctx.ellipse(x * TILE + 16, y * TILE + 18, 12, 7, 0, 0, Math.PI * 2);
-          ctx.fill();
-        }
-      }
-    }
-    for (let y = 0; y < this.gh; y++) {
-      for (let x = 0; x < this.gw; x++) {
-        if (this.grid[y * this.gw + x] !== 1) continue;
-        ctx.fillStyle = "rgba(0,0,0,0.35)";
-        ctx.beginPath();
-        ctx.ellipse(x * TILE + 16, y * TILE + 22, 12, 5, 0, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.fillStyle = "#6e6258";
-        ctx.fillRect(x * TILE + 8, y * TILE - 10, 16, 30);
-        ctx.fillStyle = "#8a7b70";
-        ctx.fillRect(x * TILE + 8, y * TILE - 10, 5, 30);
-      }
-    }
-    for (const b of this.beams) {
-      ctx.globalAlpha = Math.max(0, b.life * 5);
-      ctx.strokeStyle = b.color;
-      ctx.lineWidth = 3;
-      ctx.beginPath();
-      ctx.moveTo(b.x0, b.y0);
-      ctx.lineTo(b.x1, b.y1);
-      ctx.stroke();
-      ctx.globalAlpha = 1;
-    }
+    drawWorldSlice(ctx, this.world, this.camX, this.camY, this.viewW, this.viewH, this.zoom);
+    if (this.phase !== "fight") this.drawZones(ctx, false);
+    else this.drawZones(ctx, true);
     const order = this.fighters.filter((f) => f.alive).sort((a, b) => a.y - b.y);
     for (const f of order) {
       if (f.role === "spirit" && f.look) {
@@ -1452,7 +1846,7 @@ export class WitchArena {
           skin: f.skin,
           facing: f.facing,
           walk: f.walk,
-          attack: f.cd > 0.7 ? 0.45 : 0,
+          attack: f.cd > 0.55 ? 0.4 : 0,
           hurt: f.hurt,
           pieces: f.pieces,
           setFx: null,
@@ -1465,16 +1859,53 @@ export class WitchArena {
       const by = f.y - (f.role === "spirit" ? 36 : 44);
       ctx.fillStyle = "#1a1214";
       ctx.fillRect(f.x - bar / 2 - 1, by - 1, bar + 2, 6);
-      ctx.fillStyle = f.side === 0 ? "#e6c15a" : "#c4473a";
+      ctx.fillStyle = this.color(f.side);
       ctx.fillRect(f.x - bar / 2, by, bar * Math.max(0, f.hp / f.max), 4);
-      if (f.role !== "spirit") drawShadowName(ctx, `${f.name} ${f.level}`, f.x, by - 12, f.side === 0 ? "#fff1a8" : "#ffd0c8");
+      if (f.role !== "spirit") drawShadowName(ctx, `${f.name} ${f.level}`, f.x, by - 12, this.color(f.side));
     }
+    for (const b of this.beams) {
+      const a = Math.max(0, Math.min(1, b.life * 3));
+      ctx.save();
+      ctx.globalAlpha = a;
+      ctx.strokeStyle = b.color;
+      ctx.lineWidth = 4 / Math.max(0.4, this.zoom);
+      ctx.beginPath();
+      ctx.moveTo(b.x0, b.y0);
+      ctx.lineTo(b.x1, b.y1);
+      ctx.stroke();
+      ctx.fillStyle = "#fff6d8";
+      ctx.beginPath();
+      ctx.arc(b.x1, b.y1, 5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+    this.cfx.draw(ctx, this.clock);
     for (const fl of this.floats) {
       ctx.globalAlpha = Math.max(0, Math.min(1, fl.life * 2));
-      drawShadowName(ctx, fl.text, fl.x, fl.y - (0.8 - fl.life) * 18, fl.color);
+      drawShadowName(ctx, fl.text, fl.x, fl.y - (0.9 - fl.life) * 22, fl.color);
       ctx.globalAlpha = 1;
     }
     ctx.restore();
+  }
+
+  private drawZones(ctx: CanvasRenderingContext2D, faint: boolean): void {
+    this.zones.forEach((z, i) => {
+      if (!z) return;
+      const x = z.tx * TILE;
+      const y = z.ty * TILE;
+      const w = z.tw * TILE;
+      const h = z.th * TILE;
+      ctx.save();
+      ctx.fillStyle = this.color(i);
+      ctx.globalAlpha = faint ? 0.07 : i === this.placeFor && this.placing ? 0.28 : 0.16;
+      ctx.fillRect(x, y, w, h);
+      ctx.globalAlpha = faint ? 0.45 : 1;
+      ctx.strokeStyle = this.color(i);
+      ctx.lineWidth = !faint && i === this.placeFor && this.placing ? 3 : 2;
+      ctx.strokeRect(x + 1, y + 1, w - 2, h - 2);
+      ctx.restore();
+      if (!faint) drawShadowName(ctx, SQUADS[i]!.name, x + w / 2, y + 16, this.color(i));
+    });
   }
 }
 
@@ -1490,3 +1921,4 @@ function nearest(list: Fighter[], x: number, y: number): Fighter {
   }
   return best;
 }
+

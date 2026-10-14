@@ -176,7 +176,7 @@ export function Hub(props: {
             {busy ? "Signing out…" : "Logout"}
           </button>
         </div>
-        <p className="mt-4 text-dim">Hunt explores the rebuilt wilds. Circle is six against six. Hardcore is a separate frontier: hunt, gather water, build campfires, and survive hunger, thirst and fatigue.</p>
+        <p className="mt-4 text-dim">Hunt explores the rebuilt wilds. Circle is a battle simulator: load a map, plant teams, and watch them fight. Hardcore is a separate frontier: hunt, gather water, build campfires, and survive hunger, thirst and fatigue.</p>
       </div>
     </div>
   );

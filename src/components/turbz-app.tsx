@@ -353,7 +353,7 @@ function Title(props: {
           </button>
           {!hard && (
             <button className="px-btn" disabled={!props.circleReady} onClick={props.onCircle}>
-              {props.circleMarks != null && props.circleMarks > 0 ? `Witch Circle · ${props.circleMarks}` : "Witch Circle"}
+              TurboCircle
             </button>
           )}
           <button className="px-btn" onClick={props.onBack}>

@@ -456,6 +456,81 @@
   box-shadow: 4px 4px 0 var(--color-blood);
 }
 
+.arena-setup {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  overflow: auto;
+  padding: 12px 12px 28px;
+  pointer-events: none;
+}
+
+.arena-setup-card {
+  pointer-events: auto;
+  width: min(440px, 100%);
+  margin-top: 8px;
+  max-height: calc(100dvh - 24px);
+  overflow: auto;
+}
+
+.arena-field {
+  display: grid;
+  gap: 4px;
+  flex: 1 1 140px;
+  min-width: 0;
+}
+
+.arena-setup select,
+.arena-setup input[type="number"] {
+  width: 100%;
+  min-height: 44px;
+  padding: 6px 8px;
+  background: var(--color-ink);
+  color: var(--color-bone);
+  border: 2px solid var(--color-dim);
+  font: inherit;
+}
+
+.arena-modes {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.arena-mode-on {
+  border-color: var(--color-kyo);
+  box-shadow: 4px 4px 0 var(--color-blood);
+}
+
+.arena-teams {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.arena-team {
+  border: 3px solid var(--color-bone);
+  background: rgba(20, 14, 12, 0.92);
+  color: var(--color-bone);
+  padding: 6px 8px;
+  min-height: 44px;
+  text-align: left;
+}
+
+@media (max-width: 640px) {
+  .arena-modes {
+    grid-template-columns: 1fr;
+  }
+  .arena-hud {
+    top: 6px;
+    left: 6px;
+    right: 6px;
+  }
+}
+
 /* Designer tools share the game's pixel panel and button palette. */
 .designer-screen { pointer-events: auto; position: absolute; inset: 0; overflow: auto; padding: 24px; background: var(--color-ink); color: var(--color-bone, #f0e2c8); }
 .designer-header { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:16px; margin-bottom:24px; }
