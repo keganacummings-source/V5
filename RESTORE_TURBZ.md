@@ -1,26 +1,21 @@
-# Restore turbz-app.tsx
+# TURBZ menu update — assemble
 
-The file was truncated by an automated update that could not upload the full ~62KB source in one API call.
-
-## Quick restore (recommended)
+`src/components/turbz-app.tsx` is rebuilt from compressed parts on every `dev` / `build`.
 
 ```bash
-git fetch origin
-git checkout 65d64689d4c71cfe1a4f3241a5793e1607a503f5 -- src/components/turbz-app.tsx
-git add src/components/turbz-app.tsx
-git commit -m "Restore turbz-app.tsx from good commit"
-git push
+npm run assemble:turbz
+# or just:
+npm run dev
 ```
 
-Then re-apply the menu update locally (or ask the agent to patch after restore).
+Parts: `src/components/turbz.b64.part0` … `part7`  
+Script: `scripts/assemble-turbz.mjs`
 
-## Menu update goals (after restore)
+## What's in the update
 
-1. **Quest Board** — 10 random quests, refresh every 30 minutes
-2. **Skills** — two tabs: Account Perks | Skills list
-3. **Verses** — two tabs: Equip (max 9) | Unlock & Upgrade (sorted catalog)
-4. **Trade → Black Market** — random stock every 5 min; Items / Gear / Enchants / Spirits; gear 5–50 levels above character
+1. **Quest Board** — 10 random quests, refresh every 30 minutes  
+2. **Skills** — tabs: Account Perks | Skills  
+3. **Verses** — tabs: Equip (max 9) | Unlock & Upgrade (sorted catalog)  
+4. **Trade → Black Market** — stock refreshes every 5 minutes; Items / Gear / Enchants / Spirits; gear 5–50 levels above you  
 
-## Assemble path (experimental)
-
-`scripts/assemble-turbz.mjs` + `predev`/`prebuild` in package.json can rebuild `turbz-app.tsx` from `src/components/turbz.b64.part*` or `turbz-app.tsx.part*` once those payloads are complete.
+Engine-side equip limit / black-market stock still need a follow-up pass if combat bar does not respect 9 slots yet.
