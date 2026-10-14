@@ -17,6 +17,41 @@ export type SpawnZone = {
   count: number;
   respawn: number;
 };
+
+/** Designer-placed gathering nodes, boards, arenas, shrines, etc. */
+export type MapInteractable =
+  | { id: string; kind: "node"; node: "ore" | "tree" | "shroom" | "fish"; tx: number; ty: number }
+  | { id: string; kind: "bounty"; tx: number; ty: number; label?: string }
+  | { id: string; kind: "arena"; tx: number; ty: number; label?: string }
+  | { id: string; kind: "shrine"; type: string; tx: number; ty: number; name?: string }
+  | { id: string; kind: "hearth"; tx: number; ty: number }
+  | { id: string; kind: "dungeon"; mapId: string; tx: number; ty: number; name?: string };
+
+export type MapQuestStep =
+  | { type: "talk"; npcId: string; hint?: string }
+  | { type: "bring"; itemId: string; count: number; hint?: string }
+  | { type: "kill"; count: number; species?: string; hint?: string }
+  | { type: "goto"; tx: number; ty: number; radius?: number; hint?: string }
+  | { type: "gather"; node: "ore" | "tree" | "shroom" | "fish"; count: number; hint?: string };
+
+/** Custom NPC for quest maps: dialogue, optional multi-step quest. */
+export type MapNpc = {
+  id: string;
+  name: string;
+  tx: number;
+  ty: number;
+  role?: string;
+  female?: boolean;
+  lines: string[];
+  quest?: {
+    id: string;
+    name: string;
+    about: string;
+    rewardKyo?: number;
+    steps: MapQuestStep[];
+  };
+};
+
 export type MapTile = WorldTile & {
   sprite?: string;
   layers?: string[];
@@ -49,6 +84,10 @@ export type MapFile = {
   spawn?: { tx: number; ty: number };
   notes?: string;
   kind?: "bossroom" | "dungeon" | "world";
+  /** Resource nodes, bounty boards, arenas, shrines, hearths, dungeon doors. */
+  interactables?: MapInteractable[];
+  /** Quest / dialogue NPCs placed on this map. */
+  npcs?: MapNpc[];
 };
 
 export const FLOOR_COLOR: Record<number, string> = {
@@ -97,11 +136,23 @@ export function emptyMap(id: string, name: string, w: number, h: number, floor =
     tiles,
     spawns: [],
     zones: [],
+    interactables: [],
+    npcs: [],
     spawn: { tx: Math.floor(w / 2), ty: Math.floor(h / 2) },
   };
 }
 
 export function mapToWorld(map: MapFile): WorldData {
+  const nodeSpawns = (map.interactables ?? [])
+    .filter((it): it is Extract<MapInteractable, { kind: "node" }> => it.kind === "node")
+    .map((it) => ({
+      id: it.id,
+      kind: "node" as const,
+      node: it.node,
+      x: (it.tx + 0.5) * TILE,
+      y: (it.ty + 0.5) * TILE,
+      level: 1,
+    }));
   return {
     w: map.w,
     h: map.h,
@@ -114,7 +165,7 @@ export function mapToWorld(map: MapFile): WorldData {
       layers: t.layers,
       portal: t.portal,
     })) as WorldTile[],
-    spawns: map.spawns ? map.spawns.map((s) => ({ ...s })) : [],
+    spawns: [...(map.spawns ? map.spawns.map((s) => ({ ...s })) : []), ...nodeSpawns],
     cache: null,
   };
 }
@@ -159,18 +210,109 @@ export function parseMapJson(raw: unknown): MapFile {
     };
   });
   const spawn = m.spawn ?? { tx: 1, ty: 1 };
-  if (!Number.isInteger(spawn.tx) || !Number.isInteger(spawn.ty) || spawn.tx < 0 || spawn.ty < 0 || spawn.tx >= m.w! || spawn.ty >= m.h! || tiles[spawn.ty * m.w! + spawn.tx]!.block) throw new Error("Player start must be on a walkable tile inside the map.");
-  if (m.spawns !== undefined && (!Array.isArray(m.spawns) || m.spawns.length > 2000)) throw new Error("Invalid spawn list (maximum 2000).");
+  if (!Number.isInteger(spawn.tx) || !Number.isInteger(spawn.ty) || spawn.tx < 0 || spawn.ty < 0 || spawn.tx >= m.w! || spawn.ty >= m.h! || tiles[spawn.ty * m.w! + spawn.tx]!.block) throw new Error("Start tile must be walkable and on the map.");
+  if (m.notes !== undefined && typeof m.notes !== "string") throw new Error("Notes must be text.");
+  if (m.kind !== undefined && !["bossroom", "dungeon", "world"].includes(m.kind)) throw new Error("Map kind must be world, dungeon, or bossroom.");
   const ids = new Set<string>();
-  const spawns = (m.spawns ?? []).map(s => {
-    if (!s || typeof s.id !== "string" || !s.id || ids.has(s.id) || !["mob", "node"].includes(s.kind) || !Number.isFinite(s.x) || !Number.isFinite(s.y) || s.x < 0 || s.y < 0 || s.x >= m.w! * TILE || s.y >= m.h! * TILE || !Number.isInteger(s.level) || s.level < 1 || s.level > 1000 || tiles[Math.floor(s.y / TILE) * m.w! + Math.floor(s.x / TILE)]!.block) throw new Error("Invalid or blocked entity spawn.");
+  const spawns = (Array.isArray(m.spawns) ? m.spawns : []).map((s) => {
+    if (!s || typeof s.id !== "string" || !s.id || ids.has(s.id) || !["mob", "node"].includes(s.kind) || !Number.isFinite(s.x) || !Number.isFinite(s.y) || !Number.isInteger(s.level) || s.level < 1 || s.level > 1000 || tiles[Math.floor(s.y / TILE) * m.w! + Math.floor(s.x / TILE)]!.block) throw new Error("Invalid or blocked entity spawn.");
     if (s.kind === "mob" && (!s.species || !(MONSTER_BY_ID[s.species] || ANIMAL_BY_ID[s.species]))) throw new Error("Unknown enemy species.");
     if (s.kind === "node" && !["ore", "tree", "shroom", "fish"].includes(s.node ?? "")) throw new Error("Unknown resource node.");
     if (s.boss !== undefined && typeof s.boss !== "boolean") throw new Error("Invalid boss flag.");
     ids.add(s.id);
     return { ...s };
   });
-  return { version: MAP_VERSION, id: typeof m.id === "string" ? m.id.slice(0, 80) : "custom", name: typeof m.name === "string" ? m.name.slice(0, 100) : "Custom Map", w: m.w!, h: m.h!, tileSize: TILE, tiles, spawns, zones: parseZones(m.zones, m.w!, m.h!), spawn, notes: typeof m.notes === "string" ? m.notes.slice(0, 2000) : undefined, kind: ["bossroom", "dungeon", "world"].includes(m.kind ?? "") ? m.kind : "world" };
+  return {
+    version: MAP_VERSION,
+    id: typeof m.id === "string" ? m.id.slice(0, 80) : "custom",
+    name: typeof m.name === "string" ? m.name.slice(0, 100) : "Custom Map",
+    w: m.w!,
+    h: m.h!,
+    tileSize: TILE,
+    tiles,
+    spawns,
+    zones: parseZones(m.zones, m.w!, m.h!),
+    interactables: parseInteractables(m.interactables, m.w!, m.h!),
+    npcs: parseNpcs(m.npcs, m.w!, m.h!),
+    spawn,
+    notes: typeof m.notes === "string" ? m.notes.slice(0, 2000) : undefined,
+    kind: ["bossroom", "dungeon", "world"].includes(m.kind ?? "") ? m.kind : "world",
+  };
+}
+
+function parseInteractables(raw: unknown, w: number, h: number): MapInteractable[] {
+  if (raw == null) return [];
+  if (!Array.isArray(raw) || raw.length > 200) throw new Error("Invalid interactables (maximum 200).");
+  const ids = new Set<string>();
+  const inMap = (tx: number, ty: number) => Number.isInteger(tx) && Number.isInteger(ty) && tx >= 0 && ty >= 0 && tx < w && ty < h;
+  return raw.map((row) => {
+    if (!row || typeof row !== "object") throw new Error("Invalid interactable.");
+    const it = row as MapInteractable;
+    if (typeof it.id !== "string" || !it.id || ids.has(it.id)) throw new Error("Interactables need unique ids.");
+    ids.add(it.id);
+    if (!inMap(it.tx, it.ty)) throw new Error("Interactable is outside the map.");
+    if (it.kind === "node") {
+      if (!["ore", "tree", "shroom", "fish"].includes(it.node)) throw new Error("Unknown resource node kind.");
+      return { id: it.id, kind: "node", node: it.node, tx: it.tx, ty: it.ty };
+    }
+    if (it.kind === "bounty") return { id: it.id, kind: "bounty", tx: it.tx, ty: it.ty, label: typeof it.label === "string" ? it.label.slice(0, 40) : undefined };
+    if (it.kind === "arena") return { id: it.id, kind: "arena", tx: it.tx, ty: it.ty, label: typeof it.label === "string" ? it.label.slice(0, 40) : undefined };
+    if (it.kind === "shrine") return { id: it.id, kind: "shrine", type: String(it.type || "light").slice(0, 20), tx: it.tx, ty: it.ty, name: typeof it.name === "string" ? it.name.slice(0, 40) : undefined };
+    if (it.kind === "hearth") return { id: it.id, kind: "hearth", tx: it.tx, ty: it.ty };
+    if (it.kind === "dungeon") {
+      if (typeof it.mapId !== "string" || !/^[a-z0-9_-]{1,80}$/i.test(it.mapId)) throw new Error("Dungeon needs a valid target map id.");
+      return { id: it.id, kind: "dungeon", mapId: it.mapId, tx: it.tx, ty: it.ty, name: typeof it.name === "string" ? it.name.slice(0, 40) : undefined };
+    }
+    throw new Error("Unknown interactable kind.");
+  });
+}
+
+function parseNpcs(raw: unknown, w: number, h: number): MapNpc[] {
+  if (raw == null) return [];
+  if (!Array.isArray(raw) || raw.length > 80) throw new Error("Invalid NPCs (maximum 80).");
+  const ids = new Set<string>();
+  const inMap = (tx: number, ty: number) => Number.isInteger(tx) && Number.isInteger(ty) && tx >= 0 && ty >= 0 && tx < w && ty < h;
+  return raw.map((row) => {
+    if (!row || typeof row !== "object") throw new Error("Invalid NPC.");
+    const n = row as MapNpc;
+    if (typeof n.id !== "string" || !/^[a-z0-9_-]{1,40}$/i.test(n.id) || ids.has(n.id)) throw new Error("NPCs need unique ids (letters, numbers, dashes).");
+    ids.add(n.id);
+    if (typeof n.name !== "string" || !n.name.trim()) throw new Error("NPC needs a name.");
+    if (!inMap(n.tx, n.ty)) throw new Error("NPC is outside the map.");
+    const lines = Array.isArray(n.lines) ? n.lines.filter((l) => typeof l === "string").map((l) => l.slice(0, 200)).slice(0, 12) : [];
+    let quest: MapNpc["quest"] | undefined;
+    if (n.quest && typeof n.quest === "object") {
+      const q = n.quest;
+      if (typeof q.id !== "string" || typeof q.name !== "string") throw new Error("NPC quest needs id and name.");
+      const steps = Array.isArray(q.steps) ? q.steps.slice(0, 12).map((s) => {
+        if (!s || typeof s !== "object") throw new Error("Invalid quest step.");
+        const step = s as MapQuestStep;
+        if (step.type === "talk") return { type: "talk" as const, npcId: String(step.npcId || "").slice(0, 40), hint: typeof step.hint === "string" ? step.hint.slice(0, 120) : undefined };
+        if (step.type === "bring") return { type: "bring" as const, itemId: String(step.itemId || "").slice(0, 40), count: Math.max(1, Math.min(99, Number(step.count) || 1)), hint: typeof step.hint === "string" ? step.hint.slice(0, 120) : undefined };
+        if (step.type === "kill") return { type: "kill" as const, count: Math.max(1, Math.min(50, Number(step.count) || 1)), species: typeof step.species === "string" ? step.species.slice(0, 40) : undefined, hint: typeof step.hint === "string" ? step.hint.slice(0, 120) : undefined };
+        if (step.type === "goto") return { type: "goto" as const, tx: Number(step.tx) || 0, ty: Number(step.ty) || 0, radius: Math.max(1, Math.min(12, Number(step.radius) || 2)), hint: typeof step.hint === "string" ? step.hint.slice(0, 120) : undefined };
+        if (step.type === "gather") return { type: "gather" as const, node: (["ore", "tree", "shroom", "fish"].includes(step.node) ? step.node : "ore") as "ore" | "tree" | "shroom" | "fish", count: Math.max(1, Math.min(20, Number(step.count) || 1)), hint: typeof step.hint === "string" ? step.hint.slice(0, 120) : undefined };
+        throw new Error("Unknown quest step type.");
+      }) : [];
+      quest = {
+        id: q.id.slice(0, 40),
+        name: q.name.slice(0, 60),
+        about: typeof q.about === "string" ? q.about.slice(0, 240) : "",
+        rewardKyo: typeof q.rewardKyo === "number" ? Math.max(0, Math.min(99999, Math.floor(q.rewardKyo))) : undefined,
+        steps,
+      };
+    }
+    return {
+      id: n.id,
+      name: n.name.slice(0, 40),
+      tx: n.tx,
+      ty: n.ty,
+      role: typeof n.role === "string" ? n.role.slice(0, 40) : undefined,
+      female: !!n.female,
+      lines: lines.length ? lines : ["…"],
+      ...(quest ? { quest } : {}),
+    };
+  });
 }
 
 function parseZones(raw: unknown, w: number, h: number): SpawnZone[] {
@@ -189,6 +331,23 @@ function parseZones(raw: unknown, w: number, h: number): SpawnZone[] {
     if (!Array.isArray(q.species) || q.species.length > 40 || !q.species.every((id) => typeof id === "string" && !!(MONSTER_BY_ID[id] || ANIMAL_BY_ID[id]))) throw new Error("Spawn zone has an unknown enemy type.");
     return { id: q.id, tx: q.tx, ty: q.ty, tw: q.tw, th: q.th, levelMin: q.levelMin, levelMax: q.levelMax, species: [...q.species], count: q.count, respawn: q.respawn };
   });
+}
+
+/** Nodes from the designer become world spawns so gathering works. */
+export function expandInteractableNodes(map: MapFile): Spawn[] {
+  const out: Spawn[] = [];
+  for (const it of map.interactables ?? []) {
+    if (it.kind !== "node") continue;
+    out.push({
+      id: it.id,
+      kind: "node",
+      node: it.node,
+      x: (it.tx + 0.5) * TILE,
+      y: (it.ty + 0.5) * TILE,
+      level: 1,
+    });
+  }
+  return out;
 }
 
 /** Turn designer zones into live mob spawns on walkable tiles inside each rectangle. */
