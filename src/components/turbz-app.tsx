@@ -301,9 +301,6 @@ function Hunt() {
             seed={arenaSeed}
             onClose={() => setScreen("hub")}
             onCloud={onArenaCloud}
-            onGrave={(body) => {
-              void postGrave(body).catch(() => {});
-            }}
           />
         )}
         {screen === "boards" && snap.mode !== "play" && <Boards onBack={() => setScreen("hub")} />}
@@ -554,7 +551,8 @@ function Play({
           <Vitals snap={snap} />
           {snap.foe && <p className="vitals-line text-kyo" data-testid="vitals-foe">{snap.foe}</p>}
           {snap.turn && <p className="vitals-line text-dim">{snap.turn}</p>}
-          {snap.autoplay && <p className="vitals-line text-kyo">Autoplay · {snap.grind || "looking"}</p>}
+          {snap.autoplay && <p className="vitals-line text-kyo">Autoplay · {snap.grind || "looking"} · attacks on</p>}
+          {snap.rules === "hardcore" && !snap.autoplay && <p className="vitals-line text-dim">Manual attacks · press Attack</p>}
           {snap.jarLeft > 0 && <p className="vitals-line text-kyo">Ghost jar · {snap.jarLeft}s</p>}
           {snap.log[0] && <p className="vitals-line vitals-log" data-testid="vitals-log">{snap.log[0]}</p>}
           {snap.shrine && <p className="vitals-line text-kyo">{snap.shrine}</p>}
@@ -622,7 +620,7 @@ function Play({
           </div>
         </div>
       )}
-      <FloatWin id="movebar" title="Verses · 1-9 to cast" compact def={() => { const w = Math.min(vw() - 16, snap.bar.length * 92 + 28); return { x: Math.max(8, Math.round((vw() - w) / 2)), y: vh() - (narrow() ? 200 : 118), w }; }}>
+      <FloatWin id="movebar" title="Verses · 1-9 or numpad · 0 attacks" compact def={() => { const w = Math.min(vw() - 16, snap.bar.length * 92 + 140); return { x: Math.max(8, Math.round((vw() - w) / 2)), y: vh() - (narrow() ? 220 : 148), w }; }}>
         <VerseBar snap={snap} game={game} />
       </FloatWin>
       <button

@@ -74,32 +74,47 @@ export function Vitals({ snap }: { snap: Snap }) {
 }
 
 export function VerseBar({ snap, game }: { snap: Snap; game: TurbzGame | null }) {
+  const manual = snap.rules === "hardcore" && !snap.autoplay;
   return (
-    <div className="hotbar" data-testid="move-bar">
-      {snap.bar.map((move, i) => {
-        const cooling = move.cd > 0.05;
-        const pct = cooling ? Math.min(100, (move.cd / Math.max(0.05, move.max)) * 100) : 0;
-        return (
-          <button
-            key={`${move.id}-${i}`}
-            type="button"
-            data-testid={`move-btn-${move.id}`}
-            className={`hot-slot hot-${move.type} ${cooling ? "hot-slot-cd" : "hot-slot-ready"}`}
-            title={snap.abilities.find((a) => a.id === move.id)?.about ?? move.name}
-            onClick={() => game?.cast(i)}
-          >
-            {i < 9 && <kbd className="key-badge hot-key">{i + 1}</kbd>}
-            <span className={`hot-name type-${move.type}`}>{move.name}</span>
-            <span className="hot-tag">{move.tag.split(" · ")[0]}</span>
-            {cooling && (
-              <>
-                <span className="hot-cd" style={{ height: `${pct}%` }} />
-                <span className="hot-cd-num">{move.cd.toFixed(move.cd < 1 ? 1 : 0)}</span>
-              </>
-            )}
-          </button>
-        );
-      })}
+    <div>
+      {manual && <p className="vitals-line text-dim">Hardcore only swings when you press Attack.</p>}
+      <div className="hotbar" data-testid="move-bar">
+        <button
+          type="button"
+          data-testid="attack-btn"
+          className="hot-slot hot-attack"
+          title="Attack the nearest thing in range (Numpad 0)"
+          onClick={() => game?.attack()}
+        >
+          <kbd className="key-badge hot-key">0</kbd>
+          <span className="hot-name">Attack</span>
+          <span className="hot-tag">nearest</span>
+        </button>
+        {snap.bar.map((move, i) => {
+          const cooling = move.cd > 0.05;
+          const pct = cooling ? Math.min(100, (move.cd / Math.max(0.05, move.max)) * 100) : 0;
+          return (
+            <button
+              key={`${move.id}-${i}`}
+              type="button"
+              data-testid={`move-btn-${move.id}`}
+              className={`hot-slot hot-${move.type} ${cooling ? "hot-slot-cd" : "hot-slot-ready"}`}
+              title={`${snap.abilities.find((a) => a.id === move.id)?.about ?? move.name} · key ${i + 1} or numpad ${i + 1}`}
+              onClick={() => game?.cast(i)}
+            >
+              {i < 9 && <kbd className="key-badge hot-key">{i + 1}</kbd>}
+              <span className={`hot-name type-${move.type}`}>{move.name}</span>
+              <span className="hot-tag">{move.tag.split(" · ")[0]}</span>
+              {cooling && (
+                <>
+                  <span className="hot-cd" style={{ height: `${pct}%` }} />
+                  <span className="hot-cd-num">{move.cd.toFixed(move.cd < 1 ? 1 : 0)}</span>
+                </>
+              )}
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }

@@ -42,9 +42,11 @@ export class GravesStore {
       )
     `);
     sql.exec(`CREATE INDEX IF NOT EXISTS idx_graves_mode_score ON graves(mode, score DESC, id ASC)`);
+    sql.exec(`DELETE FROM graves WHERE mode = 'arena'`);
   }
 
   list(mode: GraveMode, limit = 40): GraveRow[] {
+    if (mode === "arena") return [];
     const rows = this.sql
       .exec(
         `SELECT id, username, mode, score, name, race, level, payload, created_at
@@ -78,6 +80,7 @@ export class GravesStore {
   }
 
   post(username: string, body: GraveBody, now: number): void {
+    if (body.mode === "arena") return;
     // Simple rate limit: max 8 graves per user in last 20s
     const recent = this.sql
       .exec(

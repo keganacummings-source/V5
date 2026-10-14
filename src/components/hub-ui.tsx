@@ -184,7 +184,6 @@ export function Hub(props: {
 
 const BOARDS: { id: GraveMode; label: string }[] = [
   { id: "hunt", label: "Hunt" },
-  { id: "arena", label: "Circle" },
   { id: "hardcore", label: "Hardcore" },
 ];
 
@@ -217,7 +216,7 @@ export function Boards({ onBack }: { onBack: () => void }) {
         <p className="font-display text-xs text-blood">GRAVE LEDGER</p>
         <h2 className="font-display mt-2 text-sm text-bone">Only the dead are counted</h2>
         <p className="mt-2 text-dim">A global score of fallen witches. Open a name to see the kit, the enchants, and the account that wore them.</p>
-        <div className="mt-3 grid grid-cols-3 gap-1">
+        <div className="mt-3 grid grid-cols-2 gap-1">
           {BOARDS.map((b) => (
             <button key={b.id} className={`px-btn ${mode === b.id ? "px-btn-kyo" : ""}`} type="button" onClick={() => setMode(b.id)}>
               {b.label}

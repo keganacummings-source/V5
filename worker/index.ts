@@ -208,8 +208,8 @@ async function handleGraves(request: Request, env: Env, url: URL): Promise<Respo
 
     if (request.method === "GET") {
       const modeRaw = url.searchParams.get("mode") ?? "hunt";
-      if (modeRaw !== "hunt" && modeRaw !== "arena" && modeRaw !== "hardcore") {
-        return json({ error: "unknown board" }, 400);
+      if (modeRaw !== "hunt" && modeRaw !== "hardcore") {
+        return json([]);
       }
       const rows = await stub.list(modeRaw);
       return json(rows);
@@ -223,7 +223,8 @@ async function handleGraves(request: Request, env: Env, url: URL): Promise<Respo
       if (raw instanceof Response) return raw;
       if (!raw || typeof raw !== "object") return json({ error: "bad grave" }, 400);
       const body = raw as Record<string, unknown>;
-      const mode = body.mode === "hunt" || body.mode === "arena" || body.mode === "hardcore" ? body.mode : null;
+      const mode = body.mode === "hunt" || body.mode === "hardcore" ? body.mode : null;
+      if (body.mode === "arena") return json({ ok: true });
       if (!mode) return json({ error: "unknown board" }, 400);
       const name = String(body.name ?? "").slice(0, 24).trim();
       if (!name) return json({ error: "nameless grave" }, 400);

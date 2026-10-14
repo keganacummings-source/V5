@@ -235,6 +235,7 @@ export const postGrave = createServerFn({ method: "POST" })
     return body;
   })
   .handler(async ({ context, data }) => {
+    if (data.mode === "arena") return false;
     const sql = await getSql();
     const recent = await sql<{ n: number }>`
       select count(*)::int as n from turbz_graves
@@ -253,6 +254,7 @@ export const listGraves = createServerFn({ method: "GET" })
   .middleware([authMiddleware])
   .validator((data: { mode: string }) => ({ mode: asMode(String(data?.mode ?? "hunt")) }))
   .handler(async ({ data }) => {
+    if (data.mode === "arena") return [];
     const sql = await getSql();
     const rows = await sql<{
       id: number;

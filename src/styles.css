@@ -712,11 +712,13 @@
 
 .hotbar { display: flex; gap: 6px; overflow-x: auto; padding: 6px 2px 2px; }
 .hot-slot { position: relative; flex: none; width: 86px; height: 70px; display: flex; flex-direction: column; justify-content: flex-end; align-items: flex-start; gap: 1px; padding: 4px 5px; text-align: left; border: 2px solid var(--color-bone); background: #0d0908; color: var(--color-bone); box-shadow: 3px 3px 0 var(--color-blood); overflow: hidden; transition: transform 90ms ease, border-color 120ms ease, box-shadow 90ms ease; }
+.hot-slot.hot-attack { border-color: var(--color-kyo); color: var(--color-kyo); }
 .hot-slot:hover { transform: translateY(-3px); border-color: var(--color-kyo); }
 .hot-slot:active { transform: translate(2px, 2px); box-shadow: 0 0 0 var(--color-blood); }
 .hot-slot-ready { animation: hot-ready 260ms ease-out; }
 @keyframes hot-ready { 0% { border-color: #fff; box-shadow: 0 0 0 3px var(--color-kyo); } 100% { border-color: var(--color-bone); } }
 .hot-slot::before { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 4px; background: currentColor; opacity: 0.9; }
+.hot-attack::before { background: var(--color-kyo); }
 .hot-fire::before { background: #f08a24; } .hot-water::before { background: #5ab0e8; } .hot-earth::before { background: #a8823e; } .hot-air::before { background: #9ad8c8; }
 .hot-electric::before { background: #f2d43a; } .hot-ice::before { background: #9ad0ff; } .hot-void::before { background: #6a4cff; } .hot-light::before { background: #fff1a8; }
 .hot-spirit::before { background: #c9a6e8; } .hot-ghoul::before { background: #8d72a8; } .hot-normal::before { background: #a89880; }

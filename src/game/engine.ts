@@ -505,13 +505,26 @@ export class TurbzGame {
 				"ArrowDown",
 				"ArrowLeft",
 				"ArrowRight",
-				"Space"
+				"Space",
+				"Numpad0",
+				"Numpad1",
+				"Numpad2",
+				"Numpad3",
+				"Numpad4",
+				"Numpad5",
+				"Numpad6",
+				"Numpad7",
+				"Numpad8",
+				"Numpad9",
+				"NumpadEnter"
 			].includes(e.code)) e.preventDefault();
 			if (e.repeat) return;
 			if (e.code.startsWith("Digit")) {
 				const digit = Number(e.code.slice(5));
 				if (digit >= 1 && digit <= 9) this.cast(digit - 1);
 			}
+			if (/^Numpad[1-9]$/.test(e.code)) this.cast(Number(e.code.slice(6)) - 1);
+			if (e.code === "Numpad0" || e.code === "NumpadEnter") this.attack();
 			if (e.code === "KeyE") this.interact();
 			if (e.code === "KeyI" || e.code === "KeyB") this.toggle("bag");
 			if (e.code === "KeyK") this.toggle("skills");
@@ -1618,7 +1631,57 @@ export class TurbzGame {
 		const id = save.bar[index];
 		const move = id ? MOVE_BY_ID[id] : void 0;
 		if (!move) return;
-		this.castMove(move);
+		if (!this.castMove(move)) this.say("Out of range, or that move is cooling.");
+	}
+	/** TurboHunt always swings. Hardcore swings on its own only while autogrind is on. */
+	autoAttacks() {
+		return this.rules !== "hardcore" || !!this.autoplay;
+	}
+	isOffense(m) {
+		const tac = moveTactic(m);
+		return tac !== "heal" && tac !== "ward" && tac !== "roll" && tac !== "dash" && tac !== "surge" && m.effect !== "mend" && m.effect !== "shell";
+	}
+	moveReaches(m, dist) {
+		const tac = moveTactic(m);
+		const pad = tac === "blink" || tac === "lunge" ? 8 : 4;
+		return dist <= attackRange(m) + pad;
+	}
+	/** Closest living thing that at least one of these moves can actually hit. */
+	nearestInRange(moves) {
+		const save = this.save;
+		if (!save || !moves?.length) return null;
+		let best = null;
+		let bd = Infinity;
+		for (const mob of this.mobs) {
+			if (!mob.alive) continue;
+			const d = Math.hypot(mob.x - save.x, mob.y - save.y);
+			if (d >= bd) continue;
+			if (moves.some((mv) => this.moveReaches(mv, d))) {
+				bd = d;
+				best = mob;
+			}
+		}
+		return best;
+	}
+	castOffense(foe) {
+		const save = this.save;
+		if (!save || !foe?.alive) return false;
+		const dist = Math.hypot(foe.x - save.x, foe.y - save.y);
+		const magicBetter = bodyRead(foe.type).kind === "magic";
+		const pick = this.arsenal(save).filter((m) => (this.cds[m.id] ?? 0) <= 0 && this.isOffense(m) && this.moveReaches(m, dist))
+			.sort((a, b) => this.moveScore(b, foe, magicBetter, dist) - this.moveScore(a, foe, magicBetter, dist))[0];
+		if (!pick) return false;
+		return this.castMove(pick, foe);
+	}
+	/** Manual swing. Always the nearest thing currently in range. */
+	attack() {
+		const save = this.save;
+		if (!save || this.dead || snap.mode !== "play") return false;
+		if (this.castLock > 0 || this.lunge) return false;
+		const foe = this.fightTarget();
+		if (foe && this.castOffense(foe)) return true;
+		this.say(foe ? "Moves are still cooling." : "Nothing in range.");
+		return false;
 	}
 	arsenal(save) {
 		return Object.keys(save.abilityRanks ?? {}).filter(id => MOVE_BY_ID[id]).map(id => MOVE_BY_ID[id]);
@@ -1653,16 +1716,8 @@ export class TurbzGame {
 			const roll = by("roll");
 			if (roll && Math.hypot(foe.x - save.x, foe.y - save.y) < 78 && this.castMove(roll, foe)) return true;
 		}
-		if (!foe || ready.length === 0) return false;
-		const dist = Math.hypot(foe.x - save.x, foe.y - save.y);
-		const magicBetter = bodyRead(foe.type).kind === "magic";
-		const pick = ready.filter((m) => {
-			const tac = moveTactic(m);
-			if (tac === "heal" || tac === "ward" || tac === "roll" || tac === "dash" || tac === "surge") return false;
-			return dist <= attackRange(m) + 36 || tac === "blink" || tac === "lunge";
-		}).sort((a, b) => this.moveScore(b, foe, magicBetter, dist) - this.moveScore(a, foe, magicBetter, dist))[0];
-		if (!pick) return false;
-		return this.castMove(pick, foe);
+		if (!foe) return false;
+		return this.castOffense(foe);
 	}
 	moveScore(m, foe, magicBetter, dist) {
 		const tac = moveTactic(m);
@@ -1686,14 +1741,19 @@ export class TurbzGame {
 		const tactic = moveTactic(move);
 		const selfCast = tactic === "heal" || tactic === "ward" || tactic === "roll" || tactic === "dash" || tactic === "surge" || move.effect === "mend" || move.effect === "shell";
 		const reach = attackRange(move);
-		const target = selfCast ? null : prefer && prefer.alive ? prefer : this.nearestMob(save.x, save.y, reach + 48);
+		const pad = tactic === "blink" || tactic === "lunge" ? 8 : 4;
+		const distTo = (mob) => Math.hypot(mob.x - save.x, mob.y - save.y);
+		let target = null;
+		if (!selfCast) {
+			if (prefer && prefer.alive && distTo(prefer) <= reach + pad) target = prefer;
+			else target = this.nearestMob(save.x, save.y, reach + pad + 0.5);
+		}
 		if (!selfCast && !target && tactic !== "blink") return false;
 		const rootedNow = this.status.some((s) => s.id === "root" && s.t > 0);
 		if (tactic === "dash" && rootedNow) {
 			this.float(save.x, save.y - 40, "ROOTED", "#6ecf6a");
 			return false;
 		}
-		if (target && tactic !== "blink" && tactic !== "lunge" && Math.hypot(target.x - save.x, target.y - save.y) > reach + 40) return false;
 		const swift = this.chan("swift");
 		const form = attackForm(move);
 		let cd = Math.max(.28, (.55 + move.power / 90 - move.priority * .08) * (1 - Math.min(.4, swift / 100)));
@@ -2733,18 +2793,9 @@ export class TurbzGame {
 	fightTarget(): Mob | null {
 		const save = this.save;
 		if (!save) return null;
-		let best: Mob | null = null;
-		let bd = 230;
-		for (const m of this.mobs) {
-			if (!m.alive) continue;
-			const d = Math.hypot(m.x - save.x, m.y - save.y);
-			if (!this.wantsFight(m, d) && m.hurt <= 0) continue;
-			if (d < bd) {
-				bd = d;
-				best = m;
-			}
-		}
-		return best;
+		const moves = this.arsenal(save).filter((m) => this.isOffense(m));
+		if (!moves.length) return this.nearestMob(save.x, save.y, 52);
+		return this.nearestInRange(moves);
 	}
 	inFight() {
 		return !!this.fightTarget();
@@ -2796,7 +2847,8 @@ export class TurbzGame {
 		const step = this.turnQ.shift();
 		if (!step) return;
 		if (step.side === "you") {
-			if (this.status.some((s) => s.id === "sleep") || !this.autoBattle()) {
+			const manual = !this.autoAttacks();
+			if (!manual && (this.status.some((s) => s.id === "sleep") || !this.autoBattle())) {
 				this.float(save.x, save.y - 44, "WAIT", "#c8c0b0");
 				while (this.turnQ[0]?.side === "spirit") this.turnQ.shift();
 			}
@@ -3527,7 +3579,7 @@ export class TurbzGame {
 		this.autoPlan = 0;
 		this.grind = this.autoplay ? "looking" : "";
 		this.dest = null;
-		this.say(this.autoplay ? "Autoplay. She grinds her lowest skill." : "Autoplay off.");
+		this.say(this.autoplay ? (this.rules === "hardcore" ? "Autogrind. She gathers and attacks whatever is nearest in range." : "Autoplay. She grinds and attacks whatever is nearest in range.") : "Autoplay off.");
 		this.syncHud(true);
 	}
 	sell(uid) {
@@ -5094,8 +5146,8 @@ export class TurbzGame {
 			aim: this.castLock > 0 ? "Casting..." : this.channel ? (this.channel.kind === "fishing" ? "Fishing..." : "Gathering...") : "Press E beside a node or the water. Right-click for menus.",
 			hint: this.hint,
 			foe: (() => {
-				const mob = this.nearestMob(save.x, save.y, 230);
-				if (!mob || this.combat <= 0 && mob.hurt <= 0) return "";
+				const mob = this.fightTarget();
+				if (!mob) return "";
 				const read = bodyRead(mob.type);
 				return `${mob.name} · Lv ${mob.level} · ${TYPES[mob.type].name} · ${Math.ceil(mob.hp)}/${Math.ceil(mob.max)} · ${read.kind === "magic" ? "magic hits harder" : "physical hits harder"}`;
 			})(),
