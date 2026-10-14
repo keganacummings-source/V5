@@ -7,6 +7,9 @@
     "nf3": "0.3.17"
   },
   "scripts": {
+    "assemble:turbz": "node scripts/assemble-turbz.mjs",
+    "predev": "node scripts/assemble-turbz.mjs",
+    "prebuild": "node scripts/assemble-turbz.mjs",
     "dev": "node scripts/with-app-env.mjs vite dev --host 0.0.0.0 --port 8080",
     "build": "node scripts/with-app-env.mjs vite build && npm run db:migrate",
     "db:migrate": "node scripts/migrate.mjs",
@@ -19,7 +22,7 @@
     "test": "node --test 'scripts/**/*.test.mjs' && node --experimental-strip-types --test src/lib/app-data/app-data.test.ts src/lib/app-data/readiness-schedule.test.ts src/lib/auth/gate-identity.test.ts src/lib/auth/sign-in-gate.test.ts src/lib/preview-path-prefix.test.ts && node --experimental-strip-types --test worker/signaling-core.test.ts worker/account-store.test.ts",
     "lint": "eslint .",
     "format": "prettier --write .",
-    "build:static": "node scripts/fetch-map-assets.mjs && vite build --config turbz-static.config.mjs",
+    "build:static": "node scripts/assemble-turbz.mjs && node scripts/fetch-map-assets.mjs && vite build --config turbz-static.config.mjs",
     "deploy:cf": "npm run build:static && npx wrangler deploy",
     "deploy": "npm run deploy:cf",
     "cf:types": "npx wrangler types",
