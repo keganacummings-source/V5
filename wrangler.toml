@@ -40,6 +40,10 @@ class_name = "SignalingRoom"
 name = "ACCOUNTS"
 class_name = "UserAccount"
 
+[[durable_objects.bindings]]
+name = "GRAVES"
+class_name = "GravesBoard"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["SignalingRoom", "LobbyRegistry"]
@@ -49,6 +53,11 @@ new_sqlite_classes = ["SignalingRoom", "LobbyRegistry"]
 tag = "v2"
 deleted_classes = ["LobbyRegistry"]
 new_sqlite_classes = ["UserAccount"]
+
+# v3: global leaderboard of graves.
+[[migrations]]
+tag = "v3"
+new_sqlite_classes = ["GravesBoard"]
 
 [observability]
 enabled = true

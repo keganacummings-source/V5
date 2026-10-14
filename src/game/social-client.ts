@@ -40,13 +40,31 @@ export async function listFriends(): Promise<FriendRow[]> {
 }
 
 export async function postGrave(body: GraveBody): Promise<void> {
-  if (local) return;
+  if (local) {
+    const res = await fetch("/api/graves", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const err = (await res.json().catch(() => ({}))) as { error?: string };
+      throw new Error(err.error || "Could not record the grave");
+    }
+    return;
+  }
   const mod = await import("./social-api");
   await mod.postGrave({ data: body });
 }
 
 export async function listGraves(mode: GraveMode): Promise<GraveRow[]> {
-  if (local) return [];
+  if (local) {
+    const res = await fetch(`/api/graves?mode=${encodeURIComponent(mode)}`);
+    if (!res.ok) {
+      const err = (await res.json().catch(() => ({}))) as { error?: string };
+      throw new Error(err.error || "The board is dark.");
+    }
+    return (await res.json()) as GraveRow[];
+  }
   const mod = await import("./social-api");
   return mod.listGraves({ data: { mode } });
 }
